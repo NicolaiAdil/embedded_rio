@@ -1,0 +1,3 @@
+[submodule "lib/rio-lib"]
+	path = lib/rio-lib
+	url = git@github.com:NicolaiAdil/rio-lib.git
