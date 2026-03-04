@@ -15,13 +15,13 @@
 //   DATA UART: 921600 (binary stream)
 // Wiring (TTL 3.3V):
 //   Radar GND    <-> Teensy GND
-//   Radar CLI_TX ->  Teensy Serial1 RX (pin 7)
-//   Radar CLI_RX <-  Teensy Serial1 TX (pin 8)
-//   Radar DATA_TX->  Teensy Serial2 RX (pin 15)
-//   Radar DATA_RX<-  Teensy Serial2 TX (pin 14)   (optional, usually unused)
+//   Radar CLI_TX ->  Teensy Serial2 RX (pin 7)
+//   Radar CLI_RX <-  Teensy Serial2 TX (pin 8)
+//   Radar DATA_TX->  Teensy Serial3 RX (pin 15)
+//   Radar DATA_RX<-  Teensy Serial3 TX (pin 14)   (optional, usually unused)
 // ──────────────────────────────────────────────────────────────
-HardwareSerial& RADAR_CLI  = Serial2;
-HardwareSerial& RADAR_DATA = Serial3;
+HardwareSerial& RADAR_CLI  = Serial2;   // RX=pin7,  TX=pin8
+HardwareSerial& RADAR_DATA = Serial3;   // RX=pin15, TX=pin14
 
 static constexpr uint32_t RADAR_CLI_BAUD  = 115200;
 static constexpr uint32_t RADAR_DATA_BAUD = 921600;
@@ -159,29 +159,42 @@ static bool readBytesTimeout(HardwareSerial& s, uint8_t* dst, size_t n, uint32_t
   return got == n;
 }
 
-static bool radarSendLineWaitDone(const char* line, uint32_t timeout_ms = 1200) {
-  RADAR_CLI.print(line);
-  RADAR_CLI.print("\r\n");  // TI CLI expects CR+LF
+static bool radarSendCmd(const char* cmd, uint32_t timeout_ms = 2000) {
+  Serial.print("[TX] ");
+  Serial.println(cmd);
+
+  RADAR_CLI.print(cmd);
+  RADAR_CLI.print("\r\n");
+  RADAR_CLI.flush();  // ensure TX completes
 
   uint32_t t0 = millis();
-  char buf[256];
+  char buf[512];
   size_t n = 0;
 
   while (millis() - t0 < timeout_ms) {
     while (RADAR_CLI.available()) {
       char c = (char)RADAR_CLI.read();
       if (n < sizeof(buf) - 1) buf[n++] = c;
-      buf[n] = 0;
+      buf[n] = '\0';
 
-      if (strstr(buf, "Done") != nullptr || strstr(buf, "done") != nullptr) return true;
-      if (strstr(buf, "Error") != nullptr || strstr(buf, "error") != nullptr) {
-        Serial.print("  Radar replied: "); Serial.println(buf);
+      if (strstr(buf, "Done") || strstr(buf, "done")) {
+        Serial.print("[RX] "); Serial.println(buf);
+        return true;
+      }
+      if (strstr(buf, "Error") || strstr(buf, "error")) {
+        Serial.print("[RX] "); Serial.println(buf);
         return false;
       }
     }
   }
-  // Timed out — print whatever we got
-  Serial.print("  Timeout, got: ["); Serial.print(buf); Serial.println("]");
+  // Print whatever we got, showing non-printable as hex
+  Serial.print("[RX] TIMEOUT ("); Serial.print(n); Serial.print("B): ");
+  for (size_t i = 0; i < n; i++) {
+    uint8_t b = (uint8_t)buf[i];
+    if (b >= 0x20 && b < 0x7F) Serial.print((char)b);
+    else { Serial.print("<0x"); Serial.print(b, HEX); Serial.print(">"); }
+  }
+  Serial.println();
   return false;
 }
 
@@ -223,42 +236,27 @@ static const char* RADAR_CFG[] = {
   "sensorStart",
 };
 
+static constexpr size_t NUM_CFG = sizeof(RADAR_CFG) / sizeof(RADAR_CFG[0]);
+
 static bool radarConfigure() {
-  // Wait for radar to finish booting (~2s after power-on)
-  Serial.println("Waiting for radar to boot...");
-  delay(2000);
+  Serial.println("Sending radar config...");
+  for (size_t i = 0; i < NUM_CFG; i++) {
+    bool ok = radarSendCmd(RADAR_CFG[i]);
 
-  // Drain any boot messages
-  while (RADAR_CLI.available())  RADAR_CLI.read();
-  while (RADAR_DATA.available()) RADAR_DATA.read();
-
-  for (size_t i = 0; i < sizeof(RADAR_CFG)/sizeof(RADAR_CFG[0]); i++) {
-    const char* cmd = RADAR_CFG[i];
-
-    uint32_t to = 1200;
-    if (strncmp(cmd, "calib", 5) == 0 || strncmp(cmd, "measure", 7) == 0) {
-      to = 3000;
-    }
-
-    bool ok = radarSendLineWaitDone(cmd, to);
-
-    // sensorStop may fail if sensor wasn't running — that's OK
-    if (!ok && strcmp(cmd, "sensorStop") == 0) {
-      Serial.println("  sensorStop: sensor was not running (OK)");
+    // sensorStop may fail if sensor wasn't running — OK
+    if (!ok && strcmp(RADAR_CFG[i], "sensorStop") == 0) {
+      Serial.println("  (sensorStop fail is OK)");
       delay(50);
       while (RADAR_CLI.available()) RADAR_CLI.read();
       continue;
     }
-
     if (!ok) {
-      Serial.print("Radar config failed: ");
-      Serial.println(cmd);
+      Serial.print(">>> FAILED at: "); Serial.println(RADAR_CFG[i]);
       return false;
     }
-
-    Serial.print("  OK: "); Serial.println(cmd);
-    delay(10);
+    delay(20);
   }
+  Serial.println("All config commands accepted!");
   return true;
 }
 
@@ -454,81 +452,46 @@ void setup() {
   x0.q_IR = p.q_IR;
   eskf.reset(x0, P0_diag, 0.0f);
 
-  // Radar UARTs
+  // Start radar UARTs EARLY so we catch boot messages
   RADAR_CLI.begin(RADAR_CLI_BAUD);
   RADAR_DATA.begin(RADAR_DATA_BAUD);
 
-  // ── UART diagnostic ──
-  // Give radar plenty of time to boot before we start listening
-  Serial.println("Waiting 4s for radar to boot...");
-  delay(4000);
-
-  // Drain + show anything that arrived during boot
-  Serial.print("  CLI  (Serial2 RX=pin7, 115200): ");
-  {
-    int count = 0;
-    while (RADAR_CLI.available()) {
-      char c = (char)RADAR_CLI.read();
-      if (c >= 0x20 && c < 0x7F) Serial.print(c);
-      else { Serial.print("[0x"); Serial.print((uint8_t)c, HEX); Serial.print("]"); }
-      count++;
+  // Collect boot banner bytes while waiting (buffer is only 64 bytes,
+  // so we drain continuously to avoid overflow)
+  Serial.println("Waiting 5s for radar boot...");
+  char bootBuf[1024];
+  int bc = 0;
+  uint32_t t0 = millis();
+  while (millis() - t0 < 5000) {
+    while (RADAR_CLI.available() && bc < (int)sizeof(bootBuf) - 1) {
+      bootBuf[bc++] = (char)RADAR_CLI.read();
     }
-    if (count == 0) Serial.print("(nothing)");
-    Serial.println();
+    // Also drain DATA to prevent overflow
+    while (RADAR_DATA.available()) RADAR_DATA.read();
   }
+  bootBuf[bc] = '\0';
 
-  // Poke the CLI with a bare CR+LF — should get a prompt or echo back
-  Serial.println("  Sending CR+LF on CLI...");
-  RADAR_CLI.print("\r\n");
-  delay(200);
-  Serial.print("  CLI response: ");
-  {
-    int count = 0;
-    while (RADAR_CLI.available()) {
-      char c = (char)RADAR_CLI.read();
-      if (c >= 0x20 && c < 0x7F) Serial.print(c);
-      else { Serial.print("[0x"); Serial.print((uint8_t)c, HEX); Serial.print("]"); }
-      count++;
+  Serial.print("CLI boot bytes ("); Serial.print(bc); Serial.print("): ");
+  if (bc == 0) {
+    Serial.println("(none)");
+  } else {
+    for (int i = 0; i < bc; i++) {
+      uint8_t b = (uint8_t)bootBuf[i];
+      if (b >= 0x20 && b < 0x7F) Serial.print((char)b);
+      else { Serial.print("<0x"); Serial.print(b, HEX); Serial.print(">"); }
     }
-    if (count == 0) Serial.print("(nothing)");
     Serial.println();
-  }
-
-  // Try sending "version\r\n" — always works even before config
-  Serial.println("  Sending 'version' command...");
-  RADAR_CLI.print("version\r\n");
-  {
-    uint32_t t0 = millis();
-    int count = 0;
-    Serial.print("  version response: ");
-    while (millis() - t0 < 2000) {
-      while (RADAR_CLI.available()) {
-        char c = (char)RADAR_CLI.read();
-        if (c >= 0x20 && c < 0x7F) Serial.print(c);
-        else { Serial.print("[0x"); Serial.print((uint8_t)c, HEX); Serial.print("]"); }
-        count++;
-      }
-    }
-    if (count == 0) Serial.print("(nothing — check TX/RX wiring!)");
-    Serial.println();
-  }
-
-  Serial.print("  DATA (Serial3 RX=pin15, 921600): ");
-  {
-    int count = 0;
-    while (RADAR_DATA.available()) {
-      count++;
-      RADAR_DATA.read();
-    }
-    Serial.print(count); Serial.println(" bytes");
   }
   Serial.println("──────────────────────────────────");
 
-  if (!radarConfigure()) {
-    Serial.println("Radar configure failed. Check wiring / config lines.");
-    while (1) delay(100);
+  // Configure radar (don't halt on failure — continue with IMU)
+  bool radar_ok = radarConfigure();
+  if (!radar_ok) {
+    Serial.println("Radar config failed — continuing with IMU only.");
+  } else {
+    Serial.println("Radar configured OK!");
   }
-  Serial.println("RIO ESKF ready + RADAR configured");
+  Serial.println("RIO ESKF ready");
 }
 
 void loop() {
@@ -540,13 +503,15 @@ void loop() {
   }
   processImu(acc, gyr);
 
-  // --- RADAR (minimal) ---
-  // Poll non-blocking-ish: if a frame isn't ready, just continue.
+  // --- Forward any CLI bytes to Serial monitor ---
+  while (RADAR_CLI.available()) {
+    char c = (char)RADAR_CLI.read();
+    Serial.print(c);
+  }
+
+  // --- RADAR frame read ---
   size_t frame_len = 0;
   if (radarReadFrame(frame_len)) {
     radarDebugPrintFrame(radar_frame, frame_len);
-    // Next step: parse detected points TLV (type 1) and feed eskf.correct(...)
   }
-
-  delay(10);
 }
