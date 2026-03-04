@@ -9,10 +9,6 @@
 
 #include <rio/rio_eskf.h>
 
-// ──────────────────────────────────────────────────────────────
-// RADAR UART (Teensy 4.1)
-//   CLI  UART: 115200 (commands + "Done")
-//   DATA UART: 921600 (binary stream)
 // Wiring (TTL 3.3V):
 //   Radar GND    <-> Teensy GND
 //   Radar CLI_TX ->  Teensy Serial2 RX (pin 7)
@@ -22,6 +18,7 @@
 // ──────────────────────────────────────────────────────────────
 HardwareSerial& RADAR_CLI  = Serial2;   // RX=pin7,  TX=pin8
 HardwareSerial& RADAR_DATA = Serial3;   // RX=pin15, TX=pin14
+
 
 static constexpr uint32_t RADAR_CLI_BAUD  = 115200;
 static constexpr uint32_t RADAR_DATA_BAUD = 921600;
@@ -64,6 +61,71 @@ static constexpr float   GYR_SCALE = (1.0f / GYR_SENSITIVITY) * (M_PI / 180.0f);
 // I2C helpers (with error detection)
 // ──────────────────────────────────────────────────────────────
 static bool i2c_ok = true;  // cleared on any I2C error
+
+// ──────────────────────────────────────────────────────────────
+// RADAR helpers
+// ──────────────────────────────────────────────────────────────
+static inline uint32_t u32le(const uint8_t* p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static inline float f32le(const uint8_t* p) {
+  float f;
+  memcpy(&f, p, 4);
+  return f;
+}
+
+// Parse TLV type 1 (Detected Points) and print x, y, z, velocity.
+// Each point is 16 bytes: x(f32) y(f32) z(f32) v(f32).
+static void radarParseFrame(const uint8_t* frame, size_t len) {
+  if (len < 8 + 32) return;
+  const uint8_t* h = frame + 8;
+
+  uint32_t numObj = u32le(h + 20);
+  uint32_t numTLV = u32le(h + 24);
+
+  Serial.print("RADAR  obj=");
+  Serial.print((unsigned)numObj);
+  Serial.print("  tlvs=");
+  Serial.println((unsigned)numTLV);
+
+  // Walk TLVs starting after magic(8) + header(32)
+  const uint8_t* ptr = frame + 8 + 32;
+  const uint8_t* end = frame + len;
+
+  for (uint32_t t = 0; t < numTLV && ptr + 8 <= end; t++) {
+    uint32_t tlvType = u32le(ptr);
+    uint32_t tlvLen  = u32le(ptr + 4);
+    const uint8_t* tlvData = ptr + 8;
+    ptr += 8 + tlvLen;
+
+    if (ptr > end) break;  // malformed
+
+    if (tlvType == 1) {
+      // DETECTED_POINTS
+      uint32_t nPts = tlvLen / 16;
+      for (uint32_t i = 0; i < nPts; i++) {
+        const uint8_t* p = tlvData + i * 16;
+        float x = f32le(p + 0);
+        float y = f32le(p + 4);
+        float z = f32le(p + 8);
+        float v = f32le(p + 12);
+
+        Serial.print("  pt[");
+        Serial.print(i);
+        Serial.print("]  x=");
+        Serial.print(x, 2);
+        Serial.print("  y=");
+        Serial.print(y, 2);
+        Serial.print("  z=");
+        Serial.print(z, 2);
+        Serial.print("  v=");
+        Serial.print(v, 2);
+        Serial.println(" m/s");
+      }
+    }
+  }
+}
 
 static bool i2cWriteReg(uint8_t dev, uint8_t reg, uint8_t val) {
   Wire.beginTransmission(dev);
@@ -140,13 +202,6 @@ static bool  att_initialized  = false;
 static bool  time_initialized = false;
 static float last_t           = 0.0f;
 static rio::ImuSample last_imu{};
-
-// ──────────────────────────────────────────────────────────────
-// RADAR helpers (minimal)
-// ──────────────────────────────────────────────────────────────
-static inline uint32_t u32le(const uint8_t* p) {
-  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
 
 static bool readBytesTimeout(HardwareSerial& s, uint8_t* dst, size_t n, uint32_t timeout_ms) {
   uint32_t t0 = millis();
@@ -512,6 +567,6 @@ void loop() {
   // --- RADAR frame read ---
   size_t frame_len = 0;
   if (radarReadFrame(frame_len)) {
-    radarDebugPrintFrame(radar_frame, frame_len);
+    radarParseFrame(radar_frame, frame_len);
   }
 }
