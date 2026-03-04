@@ -1,53 +1,124 @@
 #include <Arduino.h>
+#include <Wire.h>
 
-// Arduino's binary.h defines B0, B1, B2, B3 etc. which clash with Eigen internals
+// Arduino's binary.h defines B0, B1, B2, B3 which clash with Eigen
 #undef B0
 #undef B1
 #undef B2
 #undef B3
 
-#include <Adafruit_BNO08x.h>
 #include <rio/rio_eskf.h>
 
 // ──────────────────────────────────────────────────────────────
-// Hardware config
+// RADAR UART (Teensy 4.1)
+//   CLI  UART: 115200 (commands + "Done")
+//   DATA UART: 921600 (binary stream)
+// Wiring (TTL 3.3V):
+//   Radar GND    <-> Teensy GND
+//   Radar CLI_TX ->  Teensy Serial1 RX (pin 7)
+//   Radar CLI_RX <-  Teensy Serial1 TX (pin 8)
+//   Radar DATA_TX->  Teensy Serial2 RX (pin 15)
+//   Radar DATA_RX<-  Teensy Serial2 TX (pin 14)   (optional, usually unused)
 // ──────────────────────────────────────────────────────────────
-#define BNO08X_RESET -1
+HardwareSerial& RADAR_CLI  = Serial2;
+HardwareSerial& RADAR_DATA = Serial3;
 
-Adafruit_BNO08x bno08x(BNO08X_RESET);
-sh2_SensorValue_t sensorValue;
+static constexpr uint32_t RADAR_CLI_BAUD  = 115200;
+static constexpr uint32_t RADAR_DATA_BAUD = 921600;
+
+static constexpr uint8_t  MAGIC[8] = {2,1,4,3,6,5,8,7};
+static constexpr size_t   RADAR_FRAME_MAX = 4096;   // increase if you output more TLVs
+static uint8_t            radar_frame[RADAR_FRAME_MAX];
+
+// ──────────────────────────────────────────────────────────────
+// BMI085 I2C addresses (SDO1/SDO2 → VDDIO)
+// ──────────────────────────────────────────────────────────────
+static constexpr uint8_t ACC_ADDR = 0x19;
+static constexpr uint8_t GYR_ADDR = 0x69;
+
+// ──────────────────────────────────────────────────────────────
+// BMI085 register addresses
+// ──────────────────────────────────────────────────────────────
+static constexpr uint8_t REG_ACC_CHIP_ID   = 0x00;
+static constexpr uint8_t REG_ACC_X_LSB     = 0x12;
+static constexpr uint8_t REG_ACC_RANGE     = 0x41;  // 0x00=±2g 0x01=±4g 0x02=±8g 0x03=±16g
+static constexpr uint8_t REG_ACC_PWR_CONF  = 0x7C;
+static constexpr uint8_t REG_ACC_PWR_CTRL  = 0x7D;
+
+static constexpr uint8_t REG_GYR_CHIP_ID   = 0x00;
+static constexpr uint8_t REG_GYR_X_LSB     = 0x02;
+static constexpr uint8_t REG_GYR_RANGE     = 0x0F;  // 0x00=±2000 … 0x04=±125 °/s
+
+// ──────────────────────────────────────────────────────────────
+// Sensor configuration & scale factors
+// ──────────────────────────────────────────────────────────────
+static constexpr uint8_t ACC_RANGE_REG_VAL = 0x02;   // ±8g
+static constexpr float   ACC_RANGE_G       = 8.0f;
+static constexpr float   ACC_SCALE = ACC_RANGE_G * 9.80665f / 32768.0f;
+
+static constexpr uint8_t GYR_RANGE_REG_VAL = 0x00;   // ±2000°/s
+static constexpr float   GYR_SENSITIVITY   = 16.384f; // LSB/°/s at ±2000°/s
+static constexpr float   GYR_SCALE = (1.0f / GYR_SENSITIVITY) * (M_PI / 180.0f);
+
+// ──────────────────────────────────────────────────────────────
+// I2C helpers (with error detection)
+// ──────────────────────────────────────────────────────────────
+static bool i2c_ok = true;  // cleared on any I2C error
+
+static bool i2cWriteReg(uint8_t dev, uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(dev);
+  Wire.write(reg);
+  Wire.write(val);
+  uint8_t err = Wire.endTransmission();
+  if (err != 0) { i2c_ok = false; return false; }
+  return true;
+}
+
+static bool i2cReadReg(uint8_t dev, uint8_t reg, uint8_t& out) {
+  Wire.beginTransmission(dev);
+  Wire.write(reg);
+  uint8_t err = Wire.endTransmission(false);
+  if (err != 0) { i2c_ok = false; out = 0; return false; }
+  if (Wire.requestFrom(dev, (uint8_t)1) != 1) { i2c_ok = false; out = 0; return false; }
+  out = Wire.read();
+  return true;
+}
+
+static bool i2cReadBurst(uint8_t dev, uint8_t reg, uint8_t* buf, uint8_t len) {
+  Wire.beginTransmission(dev);
+  Wire.write(reg);
+  uint8_t err = Wire.endTransmission(false);
+  if (err != 0) { i2c_ok = false; memset(buf, 0, len); return false; }
+  if (Wire.requestFrom(dev, len) != len) { i2c_ok = false; memset(buf, 0, len); return false; }
+  for (uint8_t i = 0; i < len; i++) buf[i] = Wire.read();
+  return true;
+}
 
 // ──────────────────────────────────────────────────────────────
 // ESKF filter
 // ──────────────────────────────────────────────────────────────
 static rio::RioEskf eskf;
 
-// ──────────────────────────────────────────────────────────────
-// Filter tuning — adjust these to match your sensor
-// ──────────────────────────────────────────────────────────────
 static rio::Params makeParams() {
   rio::Params p;
 
   p.g_W = rio::Vec3(0.0f, 0.0f, -9.80665f);
 
   // IMU noise (continuous-time spectral densities)
-  p.sigma_acc = 0.10f;   // accelerometer white noise  [m/s²/√Hz]
-  p.sigma_gyr = 0.01f;   // gyroscope white noise      [rad/s/√Hz]
-  p.sigma_ba  = 0.01f;   // accel bias random-walk      [m/s³/√Hz]
-  p.sigma_bg  = 0.001f;  // gyro  bias random-walk      [rad/s²/√Hz]
+  p.sigma_acc = 0.00132435f;
+  p.sigma_gyr = 0.01f;
+  p.sigma_ba  = 0.01f;
+  p.sigma_bg  = 0.001f;
 
-  // Bias time constants (negative = no Gauss–Markov decay)
-  p.tau_ba = 1000.0f;    // [s]
-  p.tau_bg =  500.0f;    // [s]
+  p.tau_ba = 1000.0f;
+  p.tau_bg =  500.0f;
 
-  // dt guard rails
   p.min_dt = 1e-4f;
   p.max_dt = 0.1f;
 
-  // ── Radar extrinsics (placeholder – fill in when radar is mounted) ──
   p.q_IR = rio::Quat::Identity();
   p.p_IR = rio::Vec3::Zero();
-  p.sigma_vr     = 0.038f;
+  p.sigma_vr      = 0.038f;
   p.gating_enable = true;
   p.gate_nsigma   = 3.0f;
   p.vr_sign       = 1.0f;
@@ -55,238 +126,275 @@ static rio::Params makeParams() {
   return p;
 }
 
-// Initial covariance diagonal (21-state)
-//   [ δp(3)  δv(3)  δb_a(3)  δθ(3)  δb_g(3)  δp_IR(3)  δθ_IR(3) ]
 static constexpr float P0_diag[21] = {
-  1e-6f, 1e-6f, 1e-6f,       // position  [m²]
-  1e-2f, 1e-2f, 1e-2f,       // velocity  [m²/s²]
-  1e-4f, 1e-4f, 1e-4f,       // accel bias [m²/s⁴]
-  1.1e-2f, 1.1e-2f, 1e-12f,  // attitude  [rad²]  (~6° roll/pitch, ~0 yaw)
-  1e-8f, 1e-8f, 1e-8f,       // gyro bias [rad²/s²]
-  4e-6f, 4e-6f, 4e-6f,       // radar pos [m²]
-  7.6e-5f, 7.6e-5f, 7.6e-5f  // radar att [rad²]  (~0.5°)
+  1e-6f, 1e-6f, 1e-6f,
+  1e-2f, 1e-2f, 1e-2f,
+  1e-4f, 1e-4f, 1e-4f,
+  1.1e-2f, 1.1e-2f, 1e-12f,
+  1e-8f, 1e-8f, 1e-8f,
+  4e-6f, 4e-6f, 4e-6f,
+  7.6e-5f, 7.6e-5f, 7.6e-5f
 };
 
-// ──────────────────────────────────────────────────────────────
-// State
-// ──────────────────────────────────────────────────────────────
-static bool att_initialized  = false;
-static bool time_initialized = false;
-static float last_t          = 0.0f;
-
-// Latest IMU sample (kept for potential radar correction)
+static bool  att_initialized  = false;
+static bool  time_initialized = false;
+static float last_t           = 0.0f;
 static rio::ImuSample last_imu{};
 
 // ──────────────────────────────────────────────────────────────
-// BNO08x report setup — only accel + gyro
+// RADAR helpers (minimal)
 // ──────────────────────────────────────────────────────────────
-void setReports() {
-  if (!bno08x.enableReport(SH2_ACCELEROMETER)) {
-    Serial.println("Could not enable accelerometer");
-  }
-  if (!bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED)) {
-    Serial.println("Could not enable gyroscope");
-  }
+static inline uint32_t u32le(const uint8_t* p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-// ──────────────────────────────────────────────────────────────
-// Print the current ESKF state over Serial
-// ──────────────────────────────────────────────────────────────
-static void publishState(float t) {
-  const auto& x = eskf.getState();
-
-  // Compact tab-separated line:
-  //   T  px py pz  vx vy vz  qw qx qy qz
-  Serial.print("S\t");
-  Serial.print(t, 4);          Serial.print('\t');
-
-  Serial.print(x.p_WI.x(), 4); Serial.print('\t');
-  Serial.print(x.p_WI.y(), 4); Serial.print('\t');
-  Serial.print(x.p_WI.z(), 4); Serial.print('\t');
-
-  Serial.print(x.v_WI.x(), 4); Serial.print('\t');
-  Serial.print(x.v_WI.y(), 4); Serial.print('\t');
-  Serial.print(x.v_WI.z(), 4); Serial.print('\t');
-
-  Serial.print(x.q_WI.w(), 6); Serial.print('\t');
-  Serial.print(x.q_WI.x(), 6); Serial.print('\t');
-  Serial.print(x.q_WI.y(), 6); Serial.print('\t');
-  Serial.println(x.q_WI.z(), 6);
-}
-
-// ──────────────────────────────────────────────────────────────
-// Arduino setup
-// ──────────────────────────────────────────────────────────────
-void setup() {
-  Serial.begin(115200);
-  while (!Serial) delay(10);
-
-  // ── I2C bus scan — find all devices on the bus ──
-  Wire.begin();
-  Serial.println("Scanning I2C bus...");
-  int nDevices = 0;
-  for (uint8_t addr = 1; addr < 127; addr++) {
-    Wire.beginTransmission(addr);
-    uint8_t err = Wire.endTransmission();
-    if (err == 0) {
-      Serial.print("  Found device at 0x");
-      if (addr < 16) Serial.print("0");
-      Serial.println(addr, HEX);
-      nDevices++;
+static bool readBytesTimeout(HardwareSerial& s, uint8_t* dst, size_t n, uint32_t timeout_ms) {
+  uint32_t t0 = millis();
+  size_t got = 0;
+  while (got < n && (millis() - t0) < timeout_ms) {
+    while (s.available() && got < n) {
+      dst[got++] = (uint8_t)s.read();
     }
   }
-  if (nDevices == 0) {
-    Serial.println("  No I2C devices found! Check wiring and PS pin (must be VDDIO for I2C).");
-  } else {
-    Serial.print("  Total: ");
-    Serial.print(nDevices);
-    Serial.println(" device(s)");
+  return got == n;
+}
+
+static bool radarSendLineWaitDone(const char* line, uint32_t timeout_ms = 1200) {
+  RADAR_CLI.print(line);
+  RADAR_CLI.print("\r\n");  // TI CLI expects CR+LF
+
+  uint32_t t0 = millis();
+  char buf[256];
+  size_t n = 0;
+
+  while (millis() - t0 < timeout_ms) {
+    while (RADAR_CLI.available()) {
+      char c = (char)RADAR_CLI.read();
+      if (n < sizeof(buf) - 1) buf[n++] = c;
+      buf[n] = 0;
+
+      if (strstr(buf, "Done") != nullptr || strstr(buf, "done") != nullptr) return true;
+      if (strstr(buf, "Error") != nullptr || strstr(buf, "error") != nullptr) {
+        Serial.print("  Radar replied: "); Serial.println(buf);
+        return false;
+      }
+    }
   }
-  Serial.println("──────────────────────────────────");
+  // Timed out — print whatever we got
+  Serial.print("  Timeout, got: ["); Serial.print(buf); Serial.println("]");
+  return false;
+}
 
-  // ── BMI085 accelerometer init (0x19) ──
-  // Accel starts in suspend mode — must be woken up
-  // Write 0x04 to ACC_PWR_CTRL (0x7D) to enable the accelerometer
-  Wire.beginTransmission(0x19);
-  Wire.write(0x7D);
-  Wire.write(0x04);
-  Wire.endTransmission();
-  delay(5); // must wait >= 5ms after power-on per datasheet
+// Minimal config:
+// - stop sensor
+// - set data port speed to match RADAR_DATA_BAUD
+// - (you must add your profileCfg/channelCfg/frameCfg/guiMonitor/etc here)
+// - start sensor (no external trigger)
+static const char* RADAR_CFG[] = {
+  "sensorStop",
+  "flushCfg",
+  "dfeDataOutputMode 1",
+  "channelCfg 15 7 0",
+  "adcCfg 2 1",
+  "adcbufCfg -1 0 1 1 1",
+  "profileCfg 0 60 115 7 15 0 0 100 1 64 9142 0 0 158",
+  "chirpCfg 0 0 0 0 0 0 0 1",
+  "chirpCfg 1 1 0 0 0 0 0 2",
+  "chirpCfg 2 2 0 0 0 0 0 4",
+  "frameCfg 0 2 128 0 100 1 0",
+  "lowPower 0 0",
+  "guiMonitor -1 1 1 0 0 0 1",
+  "cfarCfg -1 0 2 8 4 3 0 15 1",
+  "cfarCfg -1 1 0 8 4 4 1 15 1",
+  "multiObjBeamForming -1 1 0.5",
+  "clutterRemoval -1 0",
+  "calibDcRangeSig -1 0 -5 8 256",
+  "extendedMaxVelocity -1 0",
+  "lvdsStreamCfg -1 0 0 0",
+  "compRangeBiasAndRxChanPhase 0.0 1 0 -1 0 1 0 -1 0 1 0 -1 0 1 0 -1 0 1 0 -1 0 1 0 -1 0",
+  "measureRangeBiasAndRxChanPhase 0 1.5 0.2",
+  "CQRxSatMonitor 0 3 4 19 0",
+  "CQSigImgMonitor 0 31 4",
+  "analogMonitor 0 0",
+  "aoaFovCfg -1 -90 90 -90 90",
+  "cfarFovCfg -1 0 0 10.97",
+  "cfarFovCfg -1 1 -3.2 3.20",
+  "calibData 0 0 0",
+  "sensorStart",
+};
 
-  // Write 0x00 to ACC_PWR_CONF (0x7C) to set active mode
-  Wire.beginTransmission(0x19);
-  Wire.write(0x7C);
-  Wire.write(0x00);
-  Wire.endTransmission();
-  delay(50); // wait for accel to fully wake up
+static bool radarConfigure() {
+  // Wait for radar to finish booting (~2s after power-on)
+  Serial.println("Waiting for radar to boot...");
+  delay(2000);
 
-  // Read accel chip ID (register 0x00, should be 0x1F for BMI085)
-  Wire.beginTransmission(0x19);
-  Wire.write(0x00);
-  Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)0x19, (uint8_t)1);
-  uint8_t chipId = Wire.read();
-  Serial.print("Accel chip ID: 0x");
-  Serial.println(chipId, HEX);
+  // Drain any boot messages
+  while (RADAR_CLI.available())  RADAR_CLI.read();
+  while (RADAR_DATA.available()) RADAR_DATA.read();
 
-  // Read current accel range register (0x41), default should be 0x00 = ±2g for BMI085
-  Wire.beginTransmission(0x19);
-  Wire.write(0x41);
-  Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)0x19, (uint8_t)1);
-  uint8_t rangeReg = Wire.read();
-  Serial.print("Accel range reg (0x41): 0x");
-  Serial.println(rangeReg, HEX);
+  for (size_t i = 0; i < sizeof(RADAR_CFG)/sizeof(RADAR_CFG[0]); i++) {
+    const char* cmd = RADAR_CFG[i];
 
-  // Explicitly set range to ±8g (0x02)
-  Wire.beginTransmission(0x19);
-  Wire.write(0x41);
-  Wire.write(0x02); // BMI085_ACCEL_RANGE_8G
-  Wire.endTransmission();
-  delay(2);
+    uint32_t to = 1200;
+    if (strncmp(cmd, "calib", 5) == 0 || strncmp(cmd, "measure", 7) == 0) {
+      to = 3000;
+    }
 
-  // Read back to confirm
-  Wire.beginTransmission(0x19);
-  Wire.write(0x41);
-  Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)0x19, (uint8_t)1);
-  rangeReg = Wire.read();
-  Serial.print("Accel range after set: 0x");
-  Serial.println(rangeReg, HEX);
+    bool ok = radarSendLineWaitDone(cmd, to);
 
-  // Print raw accel data once to help debug scaling
-  Wire.beginTransmission(0x19);
-  Wire.write(0x12);
-  Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)0x19, (uint8_t)6);
-  uint8_t dbg[6];
-  for (int i = 0; i < 6; i++) dbg[i] = Wire.read();
-  int16_t dbg_z = (int16_t)(dbg[4] | (dbg[5] << 8));
-  Serial.print("Raw Z sample: ");
-  Serial.println(dbg_z);
-  Serial.print("  Expected for 1g @ ±4g: ~8192,  @ ±2g: ~16384,  @ ±3g(BMI088): ~10923");
-  Serial.println();
+    // sensorStop may fail if sensor wasn't running — that's OK
+    if (!ok && strcmp(cmd, "sensorStop") == 0) {
+      Serial.println("  sensorStop: sensor was not running (OK)");
+      delay(50);
+      while (RADAR_CLI.available()) RADAR_CLI.read();
+      continue;
+    }
 
-  // ── BMI085 gyroscope init (0x69) ──
-  // Gyro boots into normal mode by default (unlike the accel).
-  // Datasheet §6.3: GYRO_LPM1 (0x11) power-on default = 0x00 = normal mode.
+    if (!ok) {
+      Serial.print("Radar config failed: ");
+      Serial.println(cmd);
+      return false;
+    }
 
-  // Read gyro chip ID (register 0x00, should be 0x0F for BMI085/088)
-  Wire.beginTransmission(0x69);
-  Wire.write(0x00);
-  Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)0x69, (uint8_t)1);
-  uint8_t gyroChipId = Wire.read();
-  Serial.print("Gyro chip ID: 0x");
-  Serial.println(gyroChipId, HEX);
+    Serial.print("  OK: "); Serial.println(cmd);
+    delay(10);
+  }
+  return true;
+}
 
-  // Set gyro range to ±2000°/s (register 0x0F, value 0x00) — datasheet §6.3.3
-  //   0x00 = ±2000°/s  → 16.384 LSB/°/s
-  //   0x01 = ±1000°/s  → 32.768 LSB/°/s
-  //   0x02 = ±500°/s   → 65.536 LSB/°/s
-  //   0x03 = ±250°/s   → 131.072 LSB/°/s
-  //   0x04 = ±125°/s   → 262.144 LSB/°/s
-  Wire.beginTransmission(0x69);
-  Wire.write(0x0F);
-  Wire.write(0x00); // ±2000°/s
-  Wire.endTransmission();
-  delay(2);
+// Reads one complete frame into radar_frame, returns length in out_len.
+// Resyncs using magic word.
+static bool radarReadFrame(size_t& out_len) {
+  out_len = 0;
 
-  // Read back to confirm
-  Wire.beginTransmission(0x69);
-  Wire.write(0x0F);
-  Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)0x69, (uint8_t)1);
-  uint8_t gyroRange = Wire.read();
-  Serial.print("Gyro range reg (0x0F): 0x");
-  Serial.println(gyroRange, HEX);
+  // 1) find magic word
+  uint8_t win[8] = {0};
+  uint32_t t0 = millis();
+  while (millis() - t0 < 300) {
+    while (RADAR_DATA.available()) {
+      uint8_t b = (uint8_t)RADAR_DATA.read();
+      memmove(win, win + 1, 7);
+      win[7] = b;
+      if (memcmp(win, MAGIC, 8) == 0) goto magic_found;
+    }
+  }
+  return false;
 
-  // // ── BNO08x ──
-  // if (!bno08x.begin_I2C()) {
-  //   Serial.println("Failed to find BNO08x chip");
-  //   while (1) delay(10);
-  // }
-  // setReports();
+magic_found:
+  // 2) read 32-byte header (matches your PX4 driver)
+  uint8_t hdr[32];
+  if (!readBytesTimeout(RADAR_DATA, hdr, sizeof(hdr), 80)) return false;
 
-  // ── ESKF ──
-  rio::Params p = makeParams();
-  eskf.setParams(p);
+  // totalPacketLen (bytes) includes magic word in typical TI demos
+  uint32_t total_len = u32le(hdr + 4);
+  if (total_len < 8 + 32) return false;
+  if (total_len > RADAR_FRAME_MAX) return false;
 
-  rio::NominalState x0;
-  x0.p_IR = p.p_IR;
-  x0.q_IR = p.q_IR;
-  eskf.reset(x0, P0_diag, 0.0f);
+  memcpy(radar_frame + 0, MAGIC, 8);
+  memcpy(radar_frame + 8, hdr, 32);
 
-  Serial.println("RIO ESKF ready — waiting for attitude init from gravity");
+  size_t remaining = total_len - 8 - 32;
+  if (!readBytesTimeout(RADAR_DATA, radar_frame + 8 + 32, remaining, 200)) return false;
+
+  out_len = total_len;
+  return true;
+}
+
+// Minimal “sanity print”: shows number of objects + TLVs.
+// You can replace with full point parsing later.
+static void radarDebugPrintFrame(const uint8_t* frame, size_t len) {
+  if (len < 8 + 32) return;
+  const uint8_t* h = frame + 8;
+
+  uint32_t totalLen = u32le(h + 4);
+  uint32_t numObj   = u32le(h + 20);
+  uint32_t numTLV   = u32le(h + 24);
+
+  Serial.print("RADAR\tlen=");
+  Serial.print((unsigned)len);
+  Serial.print("\ttotal=");
+  Serial.print((unsigned)totalLen);
+  Serial.print("\tobj=");
+  Serial.print((unsigned)numObj);
+  Serial.print("\ttlvs=");
+  Serial.println((unsigned)numTLV);
 }
 
 // ──────────────────────────────────────────────────────────────
-// Latest accel/gyro readings (buffered because the BNO08x
-// delivers them as separate sensor events)
+// IMU
 // ──────────────────────────────────────────────────────────────
-static rio::Vec3 cur_acc = rio::Vec3::Zero();
-static rio::Vec3 cur_gyr = rio::Vec3::Zero();
-static bool      have_acc = false;
-static bool      have_gyr = false;
+static bool initBMI085() {
+  uint8_t id = 0;
 
-// ──────────────────────────────────────────────────────────────
-// Process one complete IMU sample through the ESKF
-// ──────────────────────────────────────────────────────────────
+  if (!i2cWriteReg(ACC_ADDR, REG_ACC_PWR_CTRL, 0x04)) return false;
+  delay(5);
+  if (!i2cWriteReg(ACC_ADDR, REG_ACC_PWR_CONF, 0x00)) return false;
+  delay(50);
+
+  if (!i2cReadReg(ACC_ADDR, REG_ACC_CHIP_ID, id)) return false;
+  Serial.print("Accel chip ID: 0x"); Serial.println(id, HEX);
+  if (id != 0x1F) return false;
+
+  if (!i2cWriteReg(ACC_ADDR, REG_ACC_RANGE, ACC_RANGE_REG_VAL)) return false;
+  delay(2);
+
+  if (!i2cReadReg(GYR_ADDR, REG_GYR_CHIP_ID, id)) return false;
+  Serial.print("Gyro  chip ID: 0x"); Serial.println(id, HEX);
+  if (id != 0x0F) return false;
+
+  if (!i2cWriteReg(GYR_ADDR, REG_GYR_RANGE, GYR_RANGE_REG_VAL)) return false;
+  delay(2);
+
+  i2c_ok = true;
+  return true;
+}
+
+static void recoverI2C() {
+  Serial.println("I2C error — recovering...");
+
+  Wire.end();
+  pinMode(19, OUTPUT); // SCL
+  for (int i = 0; i < 16; i++) {
+    digitalWriteFast(19, LOW);  delayMicroseconds(5);
+    digitalWriteFast(19, HIGH); delayMicroseconds(5);
+  }
+  pinMode(19, INPUT);
+
+  Wire.begin();
+  Wire.setClock(400000);
+  delay(10);
+
+  if (initBMI085()) Serial.println("Recovery OK");
+  else              Serial.println("Recovery FAILED");
+}
+
+static bool readIMU(rio::Vec3& acc, rio::Vec3& gyr) {
+  uint8_t buf[6];
+
+  if (!i2cReadBurst(ACC_ADDR, REG_ACC_X_LSB, buf, 6)) return false;
+  acc.x() = (int16_t)(buf[0] | (buf[1] << 8)) * ACC_SCALE;
+  acc.y() = (int16_t)(buf[2] | (buf[3] << 8)) * ACC_SCALE;
+  acc.z() = (int16_t)(buf[4] | (buf[5] << 8)) * ACC_SCALE;
+
+  if (!i2cReadBurst(GYR_ADDR, REG_GYR_X_LSB, buf, 6)) return false;
+  gyr.x() = (int16_t)(buf[0] | (buf[1] << 8)) * GYR_SCALE;
+  gyr.y() = (int16_t)(buf[2] | (buf[3] << 8)) * GYR_SCALE;
+  gyr.z() = (int16_t)(buf[4] | (buf[5] << 8)) * GYR_SCALE;
+
+  return true;
+}
+
 static void processImu(const rio::Vec3& f_b, const rio::Vec3& w_b) {
   const float t = static_cast<float>(millis()) * 1e-3f;
 
-  // Seed time on first call
   if (!time_initialized) {
     last_t = t;
     time_initialized = true;
     return;
   }
 
-  // Initialize attitude from gravity on the first good reading
   if (!att_initialized) {
-    if (!eskf.initAttitudeFromGravity(f_b, P0_diag, t)) {
-      return;  // |acc| not close enough to 9.81 — wait
-    }
+    if (!eskf.initAttitudeFromGravity(f_b, P0_diag, t)) return;
     att_initialized = true;
     last_t = t;
     Serial.println("Attitude initialized from gravity");
@@ -302,99 +410,143 @@ static void processImu(const rio::Vec3& f_b, const rio::Vec3& w_b) {
   s.gyr = w_b;
   last_imu = s;
 
-  // ── Prediction ──
   eskf.predict(s, dt);
   eskf.insPropagation(s, dt);
 
-  // ────────────────────────────────────────────────────────────
-  // TODO: Radar Doppler correction
-  // ────────────────────────────────────────────────────────────
-  // When the radar is connected, buffer RadarDoppler measurements
-  // and call:
-  //
-  //   rio::CorrectionResult res =
-  //       eskf.correct(radar_buf.data(), radar_buf.size(), last_imu);
-  //   radar_buf.clear();
-  //
-  // For now we just advance prior → posterior with no correction.
-  // ────────────────────────────────────────────────────────────
+  // Later: when you parse Doppler/points, call eskf.correct(...)
   eskf.advancePriorToPosterior();
-
-  publishState(t);
 }
 
 // ──────────────────────────────────────────────────────────────
-// Arduino loop
+// Setup / loop
 // ──────────────────────────────────────────────────────────────
+static void scanI2C() {
+  Serial.println("Scanning I2C bus...");
+  int n = 0;
+  for (uint8_t a = 1; a < 127; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) {
+      Serial.print("  0x"); Serial.println(a, HEX);
+      n++;
+    }
+  }
+  Serial.print("  Total: "); Serial.print(n); Serial.println(" device(s)");
+  Serial.println("──────────────────────────────────");
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial) delay(10);
+
+  Wire.begin();
+  Wire.setClock(400000);
+  scanI2C();
+  if (!initBMI085()) {
+    Serial.println("BMI085 init failed! Check wiring.");
+    while (1) delay(100);
+  }
+
+  // ESKF
+  rio::Params p = makeParams();
+  eskf.setParams(p);
+  rio::NominalState x0;
+  x0.p_IR = p.p_IR;
+  x0.q_IR = p.q_IR;
+  eskf.reset(x0, P0_diag, 0.0f);
+
+  // Radar UARTs
+  RADAR_CLI.begin(RADAR_CLI_BAUD);
+  RADAR_DATA.begin(RADAR_DATA_BAUD);
+
+  // ── UART diagnostic ──
+  // Give radar plenty of time to boot before we start listening
+  Serial.println("Waiting 4s for radar to boot...");
+  delay(4000);
+
+  // Drain + show anything that arrived during boot
+  Serial.print("  CLI  (Serial2 RX=pin7, 115200): ");
+  {
+    int count = 0;
+    while (RADAR_CLI.available()) {
+      char c = (char)RADAR_CLI.read();
+      if (c >= 0x20 && c < 0x7F) Serial.print(c);
+      else { Serial.print("[0x"); Serial.print((uint8_t)c, HEX); Serial.print("]"); }
+      count++;
+    }
+    if (count == 0) Serial.print("(nothing)");
+    Serial.println();
+  }
+
+  // Poke the CLI with a bare CR+LF — should get a prompt or echo back
+  Serial.println("  Sending CR+LF on CLI...");
+  RADAR_CLI.print("\r\n");
+  delay(200);
+  Serial.print("  CLI response: ");
+  {
+    int count = 0;
+    while (RADAR_CLI.available()) {
+      char c = (char)RADAR_CLI.read();
+      if (c >= 0x20 && c < 0x7F) Serial.print(c);
+      else { Serial.print("[0x"); Serial.print((uint8_t)c, HEX); Serial.print("]"); }
+      count++;
+    }
+    if (count == 0) Serial.print("(nothing)");
+    Serial.println();
+  }
+
+  // Try sending "version\r\n" — always works even before config
+  Serial.println("  Sending 'version' command...");
+  RADAR_CLI.print("version\r\n");
+  {
+    uint32_t t0 = millis();
+    int count = 0;
+    Serial.print("  version response: ");
+    while (millis() - t0 < 2000) {
+      while (RADAR_CLI.available()) {
+        char c = (char)RADAR_CLI.read();
+        if (c >= 0x20 && c < 0x7F) Serial.print(c);
+        else { Serial.print("[0x"); Serial.print((uint8_t)c, HEX); Serial.print("]"); }
+        count++;
+      }
+    }
+    if (count == 0) Serial.print("(nothing — check TX/RX wiring!)");
+    Serial.println();
+  }
+
+  Serial.print("  DATA (Serial3 RX=pin15, 921600): ");
+  {
+    int count = 0;
+    while (RADAR_DATA.available()) {
+      count++;
+      RADAR_DATA.read();
+    }
+    Serial.print(count); Serial.println(" bytes");
+  }
+  Serial.println("──────────────────────────────────");
+
+  if (!radarConfigure()) {
+    Serial.println("Radar configure failed. Check wiring / config lines.");
+    while (1) delay(100);
+  }
+  Serial.println("RIO ESKF ready + RADAR configured");
+}
+
 void loop() {
-  // ── Read BMI085 accelerometer (0x19), 6 bytes from register 0x12 ──
-  Wire.beginTransmission(0x19);
-  Wire.write(0x12); // ACC_X_LSB register
-  Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)0x19, (uint8_t)6);
+  // --- IMU ---
+  rio::Vec3 acc, gyr;
+  if (!readIMU(acc, gyr)) {
+    recoverI2C();
+    return;
+  }
+  processImu(acc, gyr);
 
-  uint8_t buf[6];
-  for (int i = 0; i < 6; i++) buf[i] = Wire.read();
-
-  int16_t ax = (int16_t)(buf[0] | (buf[1] << 8));
-  int16_t ay = (int16_t)(buf[2] | (buf[3] << 8));
-  int16_t az = (int16_t)(buf[4] | (buf[5] << 8));
-
-  // BMI085 ±4g range: full-scale = ±4g mapped to ±32768
-  //   scale = 4.0 * 9.80665 / 32768 ≈ 0.001197 m/s² per LSB
-  //
-  // BMI085 ranges (register 0x41):
-  //   0x00 = ±2g  → scale = 2.0 * 9.80665 / 32768
-  //   0x01 = ±4g  → scale = 4.0 * 9.80665 / 32768
-  //   0x02 = ±8g  → scale = 8.0 * 9.80665 / 32768
-  //   0x03 = ±16g → scale = 16.0 * 9.80665 / 32768
-  const float acc_scale = 8.0f * 9.80665f / 32768.0f;
-  float acc_x = ax * acc_scale;
-  float acc_y = ay * acc_scale;
-  float acc_z = az * acc_scale;
-
-  // Serial.print("Acc (m/s²): ");
-  // Serial.print(acc_x, 4); Serial.print('\t');
-  // Serial.print(acc_y, 4); Serial.print('\t');
-  // Serial.print(acc_z, 4);
-  // Serial.print("\traw Z: ");
-  // Serial.println(az);
+  // --- RADAR (minimal) ---
+  // Poll non-blocking-ish: if a frame isn't ready, just continue.
+  size_t frame_len = 0;
+  if (radarReadFrame(frame_len)) {
+    radarDebugPrintFrame(radar_frame, frame_len);
+    // Next step: parse detected points TLV (type 1) and feed eskf.correct(...)
+  }
 
   delay(10);
-
-  // ── Read BMI085 gyroscope (0x69), 6 bytes from register 0x02 ──
-  Wire.beginTransmission(0x69);
-  Wire.write(0x02); // GYRO_X_LSB register
-  Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)0x69, (uint8_t)6);
-
-  uint8_t gbuf[6];
-  for (int i = 0; i < 6; i++) gbuf[i] = Wire.read();
-
-  int16_t gx = (int16_t)(gbuf[0] | (gbuf[1] << 8));
-  int16_t gy = (int16_t)(gbuf[2] | (gbuf[3] << 8));
-  int16_t gz = (int16_t)(gbuf[4] | (gbuf[5] << 8));
-
-  // BMI085 gyro ±2000°/s: sensitivity = 16.384 LSB/°/s
-  //   scale = (1 / 16.384) * (π / 180) to get rad/s
-  //
-  // Gyro ranges (register 0x0F):
-  //   0x00 = ±2000°/s → 16.384 LSB/°/s
-  //   0x01 = ±1000°/s → 32.768 LSB/°/s
-  //   0x02 = ±500°/s  → 65.536 LSB/°/s
-  //   0x03 = ±250°/s  → 131.072 LSB/°/s
-  //   0x04 = ±125°/s  → 262.144 LSB/°/s
-  const float gyr_scale = (1.0f / 16.384f) * (M_PI / 180.0f); // → rad/s
-  float gyr_x = gx * gyr_scale;
-  float gyr_y = gy * gyr_scale;
-  float gyr_z = gz * gyr_scale;
-
-  Serial.print("Acc (m/s²): ");
-  Serial.print(acc_x, 4); Serial.print('\t');
-  Serial.print(acc_y, 4); Serial.print('\t');
-  Serial.print(acc_z, 4);
-  Serial.print("\tGyr (rad/s): ");
-  Serial.print(gyr_x, 4); Serial.print('\t');
-  Serial.print(gyr_y, 4); Serial.print('\t');
-  Serial.println(gyr_z, 4);
 }
