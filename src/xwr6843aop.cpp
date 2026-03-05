@@ -59,7 +59,7 @@ static constexpr size_t NUM_CFG = sizeof(CFG) / sizeof(CFG[0]);
 // static const size_t       NUM_CFG = NUM_CFG_ICINS2021;
 
 // ── UART handles ─────────────────────────────────────────────
-static HardwareSerial& CLI  = Serial2;   // RX=pin7,  TX=pin8
+static HardwareSerial& CLI  = Serial4;   // RX=pin7,  TX=pin8
 static HardwareSerial& DATA = Serial3;   // RX=pin15, TX=pin14
 
 static constexpr uint32_t CLI_BAUD  = 115200;

@@ -147,6 +147,7 @@ void loop() {
     }
     return;
   }
+
   if (ledState == 0) {
     digitalWrite(LED_BUILTIN, HIGH);
     ledState = 1;
@@ -158,11 +159,14 @@ void loop() {
   xwr6843aopUpdate(radarFrame);
   if (radarFrame.valid && radarFrame.numMeas > 0 && att_initialized) {
     rio::CorrectionResult res = eskf.correct(radarFrame.meas, radarFrame.numMeas, last_imu);
-    Serial.print("ESKF correct: ");
-    Serial.print(res.n_accepted); Serial.print(" accepted, ");
-    Serial.print(res.n_rejected); Serial.print(" rejected, ");
-    Serial.print(res.n_skipped);  Serial.println(" skipped");
 
+    // Prints
+    if (res.n_rejected > 0) {
+      Serial.print("ESKF correct: ");
+      Serial.print(res.n_accepted); Serial.print(" accepted, ");
+      Serial.print(res.n_rejected); Serial.print(" rejected, ");
+      Serial.print(res.n_skipped);  Serial.println(" skipped");
+    }
     const auto& x = eskf.getState();
     Serial.print("Nominal state: ");
     Serial.print("p_WI=[");
@@ -174,4 +178,5 @@ void loop() {
     Serial.print(x.v_WI.y(), 3); Serial.print(", ");
     Serial.print(x.v_WI.z(), 3); Serial.println("] m/s");
   }
+  // Send state update...
 }
