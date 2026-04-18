@@ -9,7 +9,7 @@
 #include <string.h>
 #include <math.h>
 
-#include "../config/icins2021.h"
+// #include "../config/icins2021.h"
 
 // ── Radar configuration commands (AWR6843AOP) ────────────────
 static const char* const CFG[] = {
@@ -76,15 +76,6 @@ static inline float f32le(const uint8_t* p) {
 
 // ── Internal helpers ─────────────────────────────────────────
 
-static bool readBytesTimeout(HardwareSerial& s, uint8_t* dst,
-                              size_t n, uint32_t timeout_ms) {
-  uint32_t t0 = millis();
-  size_t got = 0;
-  while (got < n && (millis() - t0) < timeout_ms)
-    while (s.available() && got < n)
-      dst[got++] = (uint8_t)s.read();
-  return got == n;
-}
 
 static bool sendCmd(const char* cmd, uint32_t timeout_ms = 2000) {
   Serial.print("[TX] "); Serial.println(cmd);
@@ -137,31 +128,67 @@ static bool configure() {
   return true;
 }
 
-static size_t readFrame() {
-  uint8_t win[8] = {0};
-  uint32_t t0 = millis();
-  while (millis() - t0 < 300) {
-    while (DATA.available()) {
-      memmove(win, win + 1, 7);
-      win[7] = (uint8_t)DATA.read();
-      if (memcmp(win, MAGIC, 8) == 0) goto magic_found;
+// ── Non-blocking frame reader state machine ──────────────────
+// The parser persists across loop() calls so the host loop is never
+// blocked waiting for radar bytes.  xwr6843aopUpdate() drains whatever
+// is in the UART FIFO and returns immediately; it signals a complete
+// frame by setting frame.valid = true.
+
+enum class FrameState : uint8_t { SYNCING, READING_HDR, READING_PAYLOAD };
+static FrameState  s_fstate     = FrameState::SYNCING;
+static uint8_t     s_win[8]     = {0};   // sliding window for magic detection
+static uint8_t     s_hdr[32];            // header accumulator
+static size_t      s_hdr_read   = 0;
+static uint32_t    s_total_len  = 0;     // total frame length from header
+static size_t      s_pay_read   = 0;     // payload bytes accumulated so far
+
+// Returns true once a complete frame has been assembled into frame_buf.
+static bool readFrameNonBlocking() {
+  while (DATA.available()) {
+    switch (s_fstate) {
+
+      case FrameState::SYNCING: {
+        memmove(s_win, s_win + 1, 7);
+        s_win[7] = (uint8_t)DATA.read();
+        if (memcmp(s_win, MAGIC, 8) == 0) {
+          memcpy(frame_buf, MAGIC, 8);
+          s_hdr_read  = 0;
+          s_fstate    = FrameState::READING_HDR;
+        }
+        break;
+      }
+
+      case FrameState::READING_HDR: {
+        s_hdr[s_hdr_read++] = (uint8_t)DATA.read();
+        if (s_hdr_read == 32) {
+          s_total_len = u32le(s_hdr + 4);
+          if (s_total_len < 8 + 32 || s_total_len > FRAME_MAX) {
+            // Malformed header — re-sync
+            s_fstate = FrameState::SYNCING;
+          } else {
+            memcpy(frame_buf + 8, s_hdr, 32);
+            s_pay_read = 0;
+            s_fstate   = FrameState::READING_PAYLOAD;
+          }
+        }
+        break;
+      }
+
+      case FrameState::READING_PAYLOAD: {
+        // Drain as many bytes as available (or needed)
+        while (DATA.available() && s_pay_read < s_total_len - 8 - 32) {
+          frame_buf[8 + 32 + s_pay_read++] = (uint8_t)DATA.read();
+        }
+        if (s_pay_read == s_total_len - 8 - 32) {
+          s_fstate = FrameState::SYNCING;   // ready for next frame
+          return true;
+        }
+        // Not enough bytes yet — return and wait for next call
+        return false;
+      }
     }
   }
-  return 0;
-
-magic_found:
-  uint8_t hdr[32];
-  if (!readBytesTimeout(DATA, hdr, sizeof(hdr), 80)) return 0;
-
-  uint32_t total_len = u32le(hdr + 4);
-  if (total_len < 8 + 32 || total_len > FRAME_MAX) return 0;
-
-  memcpy(frame_buf + 0, MAGIC, 8);
-  memcpy(frame_buf + 8, hdr, 32);
-
-  size_t remaining = total_len - 8 - 32;
-  if (!readBytesTimeout(DATA, frame_buf + 8 + 32, remaining, 200)) return 0;
-  return total_len;
+  return false;
 }
 
 /// Walk TLVs and store every detected point verbatim.
@@ -176,6 +203,16 @@ static void parseTLVs(const uint8_t* buf, size_t len, RadarFrame& frame) {
   const uint8_t* ptr = buf + 8 + 32;
   const uint8_t* end = buf + len;
 
+  // Diagnostic: print TLV layout + first-point raw bytes once every 25 frames
+  static uint32_t s_dbg_count = 0;
+  const bool do_dbg = (s_dbg_count++ % 5 == 0);
+
+  if (do_dbg) {
+    Serial.print("DBG frame len="); Serial.print((unsigned)len);
+    Serial.print(" numObj="); Serial.print(u32le(h + 20));
+    Serial.print(" numTLV="); Serial.println(u32le(h + 24));
+  }
+
   for (uint32_t ti = 0; ti < frame.numTLV && ptr + 8 <= end; ti++) {
     uint32_t tlvType = u32le(ptr);
     uint32_t tlvLen  = u32le(ptr + 4);
@@ -183,10 +220,38 @@ static void parseTLVs(const uint8_t* buf, size_t len, RadarFrame& frame) {
     ptr += 8 + tlvLen;
     if (ptr > end) break;
 
+    if (do_dbg) {
+      Serial.print("  TLV["); Serial.print(ti); Serial.print("] type=");
+      Serial.print(tlvType); Serial.print(" len="); Serial.println(tlvLen);
+    }
+
     if (tlvType == 1) {
-      // DETECTED_POINTS: 16 bytes each — x(f32) y(f32) z(f32) v(f32)
+      // DETECTED_POINTS: assumed 16 bytes each — x(f32) y(f32) z(f32) v(f32)
       // TI TLV native frame: x=lateral(right), y=range(forward), z=elevation(up).
       uint32_t nPts = tlvLen / 16;
+      if (do_dbg) {
+        Serial.print("  -> nPts="); Serial.print(nPts);
+        Serial.print(" (tlvLen%16="); Serial.print(tlvLen % 16); Serial.println(")");
+        if (nPts > 0) {
+          // Print all 16 raw bytes of the first point
+          Serial.print("  pt[0] raw hex:");
+          for (int b = 0; b < 16; b++) {
+            Serial.print(" ");
+            uint8_t v = tlvData[b];
+            if (v < 0x10) Serial.print("0");
+            Serial.print(v, HEX);
+          }
+          Serial.println();
+          // Interpret offset-12 bytes as different types
+          const uint8_t* vb = tlvData + 12;
+          int16_t  as_i16  = (int16_t)((uint16_t)vb[0] | ((uint16_t)vb[1] << 8));
+          uint32_t as_u32  = u32le(vb);
+          float    as_f32  = f32le(vb);
+          Serial.print("  offset12: i16="); Serial.print(as_i16);
+          Serial.print(" u32=0x"); Serial.print(as_u32, HEX);
+          Serial.print(" f32="); Serial.println(as_f32, 6);
+        }
+      }
       for (uint32_t i = 0; i < nPts && frame.numRaw < RadarFrame::MAX_POINTS; i++) {
         const uint8_t* p = tlvData + i * 16;
         const float raw_x = f32le(p + 0);
@@ -241,10 +306,9 @@ void xwr6843aopUpdate(RadarFrame& frame) {
   frame.numRaw = 0;
   frame.valid  = false;
 
-  size_t len = readFrame();
-  if (len == 0) return;
+  if (!readFrameNonBlocking()) return;
 
-  parseTLVs(frame_buf, len, frame);
+  parseTLVs(frame_buf, s_total_len, frame);
   frame.valid = true;
 }
 

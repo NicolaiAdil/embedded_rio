@@ -29,9 +29,9 @@ static rio::Params makeParams() {
   p.g_W = rio::Vec3(0.0f, 0.0f, -9.80665f);
 
   p.sigma_acc = 1.71675e-3f;
-  p.sigma_gyr = 2.443461e-4f;
+  p.sigma_gyr = 2.443461e-5f;
   p.sigma_ba  = 1.71675e-4f;
-  p.sigma_bg  = 2.443461e-5f;
+  p.sigma_bg  = 2.443461e-6f;
 
   p.tau_ba = 700.0f;
   p.tau_bg = 450.0f;
@@ -43,7 +43,7 @@ static rio::Params makeParams() {
   // IMU frame:   x=forward, y=right, z=up  (FRU).
   p.q_IR = rio::Quat(0.68301f, -0.18301f, -0.18301f, 0.68301f);  // Eigen (w,x,y,z)
   p.p_IR = rio::Vec3(-0.065f, 0.043f, 0.020f);
-  p.sigma_vr      = 0.038f; // 0.038f
+  p.sigma_vr      = 0.06f; // 0.038f
   p.gating_enable = true;
   p.gate_nsigma   = 5.0f;
   p.vr_sign       = 1.0f;
@@ -56,7 +56,7 @@ static constexpr float P0_diag[21] = {
   1e-6f  , 1e-6f  , 1e-6f  , // ego position (m)
   1e-2f  , 1e-2f  , 1e-2f  , // ego velocity (m/s)
   1e-4f  , 1e-4f  , 1e-4f  , // accelerometer bias (m/s²)
-  1.1e-2f, 1.1e-2f, 1e-12f , // ego attitude (rad)
+  1.1e-2f, 1.1e-2f, 1e-12f , // ego attitude (rad): roll/pitch from gravity, yaw unknown 
   1e-4f  , 1e-4f  , 1e-4f  , // gyroscope bias (rad/s)
   2.0e-3f, 2.0e-3f, 2.0e-3f, // radar position relative to IMU (m)
   1.0e-2f, 1.0e-2f, 1.0e-2f   , // radar attitude relative to IMU (rad)
@@ -66,6 +66,13 @@ static bool  att_initialized  = false;
 static bool  time_initialized = false;
 static float last_t           = 0.0f;
 static rio::ImuSample last_imu{};
+
+// ──────────────────────────────────────────────────────────────
+// Rate tracking
+// ──────────────────────────────────────────────────────────────
+static uint32_t s_imu_count   = 0;
+static uint32_t s_radar_count = 0;
+static uint32_t s_rate_t_ms   = 0;
 
 // ──────────────────────────────────────────────────────────────
 // IMU processing
@@ -96,8 +103,12 @@ static void processImu(const rio::Vec3& f_b, const rio::Vec3& w_b) {
   s.gyr = w_b;
   last_imu = s;
 
-  eskf.predict(s, dt);
-  eskf.insPropagation(s, dt);
+  if (dt >= g_params.min_dt && dt <= g_params.max_dt) {
+    eskf.predict(s, dt);
+    eskf.insPropagation(s, dt);
+  }
+
+  s_imu_count++;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -140,6 +151,8 @@ void setup() {
   Serial.println("RIO ESKF ready");
   digitalWrite(LED_BUILTIN, HIGH);
   ledState = 1;
+
+  s_rate_t_ms = millis();
 }
 
 void loop() {
@@ -153,19 +166,12 @@ void loop() {
     }
     return;
   }
-  // Serial.print("acc: [");
-  // Serial.print(acc.x(), 3); Serial.print(", ");
-  // Serial.print(acc.y(), 3); Serial.print(", ");
-  // Serial.print(acc.z(), 3); Serial.print("] m/s², gyr: [");
-  // Serial.print(gyr.x(), 3); Serial.print(", ");
-  // Serial.print(gyr.y(), 3); Serial.print(", ");
-  // Serial.print(gyr.z(), 3); Serial.println("] rad/s");  
 
   if (ledState == 0) {
     digitalWrite(LED_BUILTIN, HIGH);
     ledState = 1;
   }
-  processImu(acc, gyr);
+  processImu(acc, gyr);  // s_imu_count incremented inside
 
   // --- Radar ---
   xwr6843aopDrainCli();
@@ -185,6 +191,7 @@ void loop() {
     }
 
     rio::CorrectionResult res = eskf.correct(doppler, radarFrame.numRaw, last_imu);
+    s_radar_count++;
 
     if (res.n_rejected > 0) {
       Serial.print("ESKF correct: ");
@@ -238,5 +245,18 @@ void loop() {
     Serial.print(x.q_IR.x(), 6); Serial.print(", ");
     Serial.print(x.q_IR.y(), 6); Serial.print(", ");
     Serial.print(x.q_IR.z(), 6); Serial.println("]");
+  }
+
+  // --- Rate logging (once per second) ---
+  const uint32_t now_ms = millis();
+  if (now_ms - s_rate_t_ms >= 1000) {
+    const float dt_s = (now_ms - s_rate_t_ms) * 1e-3f;
+    Serial.print("RATES imu_hz=");
+    Serial.print(s_imu_count   / dt_s, 1);
+    Serial.print(" radar_hz=");
+    Serial.println(s_radar_count / dt_s, 1);
+    s_imu_count   = 0;
+    s_radar_count = 0;
+    s_rate_t_ms   = now_ms;
   }
 }
