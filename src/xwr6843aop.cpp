@@ -10,6 +10,8 @@
 #include <math.h>
 
 // #include "../config/icins2021.h"
+// static const char* const* const CFG = RADAR_CFG_ICINS2021;
+// static constexpr size_t NUM_CFG = NUM_CFG_ICINS2021;
 
 // ── Radar configuration commands (AWR6843AOP) ────────────────
 static const char* const CFG[] = {
@@ -21,7 +23,7 @@ static const char* const CFG[] = {
   "channelCfg 15 7 0",
   "adcCfg 2 1",
   "adcbufCfg -1 0 1 1 1",
-  "profileCfg 0 60 133 7 40 0 0 100 1 128 8000 0 0 158",
+  "profileCfg 0 60 133 7 40 0 0 100 1 128 8000 0 0 158", // "profileCfg 0 60 133 7 40 0 0 100 1 128 8000 0 0 158",
   "chirpCfg 0 0 0 0 0 0 0 1",
   "chirpCfg 1 1 0 0 0 0 0 2",
   "chirpCfg 2 2 0 0 0 0 0 4",
@@ -227,7 +229,7 @@ static void parseTLVs(const uint8_t* buf, size_t len, RadarFrame& frame) {
 
     if (tlvType == 1) {
       // DETECTED_POINTS: assumed 16 bytes each — x(f32) y(f32) z(f32) v(f32)
-      // TI TLV native frame: x=lateral(right), y=range(forward), z=elevation(up).
+      // TI TLV native frame: x= right, y= forward, z=up.
       uint32_t nPts = tlvLen / 16;
       if (do_dbg) {
         Serial.print("  -> nPts="); Serial.print(nPts);

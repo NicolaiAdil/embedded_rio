@@ -16,9 +16,9 @@
 /// One detected point parsed from TLV type 1 with axis remapping applied.
 /// The raw TLV frame (x=forward, y=left, z=up) is remapped to match the
 /// convention used by the rest of the stack (same as the PX4 driver):
-///   x =  raw_y   (left)
-///   y =  raw_x   (forward)
-///   z = -raw_z   (down)
+///   x =  raw_x   (right)
+///   y =  raw_y   (forward)
+///   z =  raw_z   (up)
 /// vr is the signed radial Doppler velocity (m/s). No normalisation is applied.
 struct RadarPoint {
   float x, y, z;  // Cartesian position in remapped radar frame (m)

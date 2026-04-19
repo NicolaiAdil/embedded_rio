@@ -28,10 +28,11 @@ static rio::Params makeParams() {
 
   p.g_W = rio::Vec3(0.0f, 0.0f, -9.80665f);
 
-  p.sigma_acc = 1.71675e-3f;
-  p.sigma_gyr = 2.443461e-5f;
-  p.sigma_ba  = 1.71675e-4f;
-  p.sigma_bg  = 2.443461e-6f;
+  p.sigma_acc = 2.2563e-3f;
+  p.sigma_ba  = 2.2563e-4f;
+
+  p.sigma_gyr = 2.443461e-4f;
+  p.sigma_bg  = 2.443461e-5f;
 
   p.tau_ba = 700.0f;
   p.tau_bg = 450.0f;
@@ -42,8 +43,9 @@ static rio::Params makeParams() {
   // Radar frame: x=forward, y=right, z=down (FRU).
   // IMU frame:   x=forward, y=right, z=up  (FRU).
   p.q_IR = rio::Quat(0.68301f, -0.18301f, -0.18301f, 0.68301f);  // Eigen (w,x,y,z)
-  p.p_IR = rio::Vec3(-0.065f, 0.043f, 0.020f);
-  p.sigma_vr      = 0.06f; // 0.038f
+  // p.p_IR = rio::Vec3(-0.065f, 0.043f, 0.020f);
+  p.p_IR = rio::Vec3(-0.4251f, 0.040737f, 0.009330f);
+  p.sigma_vr      = 0.058f; // 0.038f
   p.gating_enable = true;
   p.gate_nsigma   = 5.0f;
   p.vr_sign       = 1.0f;
@@ -58,7 +60,7 @@ static constexpr float P0_diag[21] = {
   1e-4f  , 1e-4f  , 1e-4f  , // accelerometer bias (m/s²)
   1.1e-2f, 1.1e-2f, 1e-12f , // ego attitude (rad): roll/pitch from gravity, yaw unknown 
   1e-4f  , 1e-4f  , 1e-4f  , // gyroscope bias (rad/s)
-  2.0e-3f, 2.0e-3f, 2.0e-3f, // radar position relative to IMU (m)
+  2.0e-2f, 2.0e-2f, 2.0e-2f, // radar position relative to IMU (m)
   1.0e-2f, 1.0e-2f, 1.0e-2f   , // radar attitude relative to IMU (rad)
 };
 
@@ -66,6 +68,13 @@ static bool  att_initialized  = false;
 static bool  time_initialized = false;
 static float last_t           = 0.0f;
 static rio::ImuSample last_imu{};
+
+// ──────────────────────────────────────────────────────────────
+// IMU rate limiter
+// ──────────────────────────────────────────────────────────────
+static constexpr uint32_t IMU_HZ          = 1250;
+static constexpr uint32_t IMU_PERIOD_US   = 1000000UL / IMU_HZ;
+static uint32_t s_imu_last_us             = 0;
 
 // ──────────────────────────────────────────────────────────────
 // Rate tracking
@@ -102,6 +111,11 @@ static void processImu(const rio::Vec3& f_b, const rio::Vec3& w_b) {
   s.acc = f_b;
   s.gyr = w_b;
   last_imu = s;
+
+  // Serial.print("gyro: [");
+  // Serial.print(w_b.x(), 4); Serial.print(", ");
+  // Serial.print(w_b.y(), 4); Serial.print(", ");
+  // Serial.print(w_b.z(), 4); Serial.println("]");
 
   if (dt >= g_params.min_dt && dt <= g_params.max_dt) {
     eskf.predict(s, dt);
@@ -171,13 +185,20 @@ void loop() {
     digitalWrite(LED_BUILTIN, HIGH);
     ledState = 1;
   }
-  processImu(acc, gyr);  // s_imu_count incremented inside
+
+  if (!acc.allFinite() || !gyr.allFinite()) return;
+
+  const uint32_t now_us = micros();
+  if (now_us - s_imu_last_us >= IMU_PERIOD_US) {
+    s_imu_last_us = now_us;
+    processImu(acc, gyr);
+  }
 
   // --- Radar ---
   xwr6843aopDrainCli();
   xwr6843aopUpdate(radarFrame);
   if (radarFrame.valid && radarFrame.numRaw > 0 && att_initialized) {
-    xwr6843aopPrintRaw(radarFrame);
+    // xwr6843aopPrintRaw(radarFrame);
 
     static rio::RadarDoppler doppler[RadarFrame::MAX_POINTS];
     const float t_r = static_cast<float>(millis()) * 1e-3f;
