@@ -46,7 +46,7 @@ static rio::Params makeParams() {
   // p.p_IR = rio::Vec3(-0.065f, 0.043f, 0.020f);
   p.p_IR = rio::Vec3(-0.4251f, 0.040737f, 0.009330f);
   p.sigma_vr      = 0.058f; // 0.038f
-  p.gating_enable = true;
+  p.gating_enable = false;
   p.gate_nsigma   = 5.0f;
   p.vr_sign       = 1.0f;
 
@@ -60,7 +60,7 @@ static constexpr float P0_diag[21] = {
   1e-4f  , 1e-4f  , 1e-4f  , // accelerometer bias (m/s²)
   1.1e-2f, 1.1e-2f, 1e-12f , // ego attitude (rad): roll/pitch from gravity, yaw unknown 
   1e-4f  , 1e-4f  , 1e-4f  , // gyroscope bias (rad/s)
-  2.0e-2f, 2.0e-2f, 2.0e-2f, // radar position relative to IMU (m)
+  2.0e-5f, 2.0e-5f, 2.0e-5f, // radar position relative to IMU (m)
   1.0e-2f, 1.0e-2f, 1.0e-2f   , // radar attitude relative to IMU (rad)
 };
 
@@ -266,6 +266,22 @@ void loop() {
     Serial.print(x.q_IR.x(), 6); Serial.print(", ");
     Serial.print(x.q_IR.y(), 6); Serial.print(", ");
     Serial.print(x.q_IR.z(), 6); Serial.println("]");
+
+    // Covariance std devs — per group: avg(σ_x,σ_y) | σ_z
+    const auto& P = eskf.getCovariance();
+    auto s = [&](int i){ return sqrtf(fabsf(P(i,i))); };
+    auto xy = [&](int i){ return 0.5f*(s(i)+s(i+1)); };
+    // p    v    b_a  att  b_g  p_IR q_IR
+    Serial.print("cov_xy=[");
+    Serial.print(xy( 0),4); Serial.print(", "); Serial.print(xy( 3),4); Serial.print(", ");
+    Serial.print(xy( 6),4); Serial.print(", "); Serial.print(xy( 9),4); Serial.print(", ");
+    Serial.print(xy(12),4); Serial.print(", "); Serial.print(xy(15),4); Serial.print(", ");
+    Serial.print(xy(18),4); Serial.println("]");
+    Serial.print("cov_z= [");
+    Serial.print(s( 2),4); Serial.print(", "); Serial.print(s( 5),4); Serial.print(", ");
+    Serial.print(s( 8),4); Serial.print(", "); Serial.print(s(11),4); Serial.print(", ");
+    Serial.print(s(14),4); Serial.print(", "); Serial.print(s(17),4); Serial.print(", ");
+    Serial.print(s(20),4); Serial.println("]");
   }
 
   // --- Rate logging (once per second) ---
