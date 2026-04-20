@@ -6,6 +6,7 @@
 #undef B3
 
 #include "xwr6843aop.h"
+#include "config.h"
 #include <string.h>
 #include <math.h>
 
@@ -80,7 +81,9 @@ static inline float f32le(const uint8_t* p) {
 
 
 static bool sendCmd(const char* cmd, uint32_t timeout_ms = 2000) {
+#if USB_PRINT_ENABLED
   Serial.print("[TX] "); Serial.println(cmd);
+#endif
   CLI.print(cmd); CLI.print("\r\n"); CLI.flush();
 
   uint32_t t0 = millis();
@@ -93,13 +96,20 @@ static bool sendCmd(const char* cmd, uint32_t timeout_ms = 2000) {
       if (n < sizeof(buf) - 1) buf[n++] = c;
       buf[n] = '\0';
       if (strstr(buf, "Done") || strstr(buf, "done")) {
-        Serial.print("[RX] "); Serial.println(buf); return true;
+#if USB_PRINT_ENABLED
+        Serial.print("[RX] "); Serial.println(buf);
+#endif
+        return true;
       }
       if (strstr(buf, "Error") || strstr(buf, "error")) {
-        Serial.print("[RX] "); Serial.println(buf); return false;
+#if USB_PRINT_ENABLED
+        Serial.print("[RX] "); Serial.println(buf);
+#endif
+        return false;
       }
     }
   }
+#if USB_PRINT_ENABLED
   Serial.print("[RX] TIMEOUT ("); Serial.print(n); Serial.print("B): ");
   for (size_t i = 0; i < n; i++) {
     uint8_t b = (uint8_t)buf[i];
@@ -107,26 +117,35 @@ static bool sendCmd(const char* cmd, uint32_t timeout_ms = 2000) {
     else { Serial.print("<0x"); Serial.print(b, HEX); Serial.print(">"); }
   }
   Serial.println();
+#endif
   return false;
 }
 
 static bool configure() {
+#if USB_PRINT_ENABLED
   Serial.println("Sending radar config...");
+#endif
   for (size_t i = 0; i < NUM_CFG; i++) {
     bool ok = sendCmd(CFG[i]);
     if (!ok && strcmp(CFG[i], "sensorStop") == 0) {
+#if USB_PRINT_ENABLED
       Serial.println("  (sensorStop fail is OK)");
+#endif
       delay(50);
       while (CLI.available()) CLI.read();
       continue;
     }
     if (!ok) {
+#if USB_PRINT_ENABLED
       Serial.print(">>> FAILED at: "); Serial.println(CFG[i]);
+#endif
       return false;
     }
     delay(20);
   }
+#if USB_PRINT_ENABLED
   Serial.println("All config commands accepted!");
+#endif
   return true;
 }
 
@@ -209,11 +228,13 @@ static void parseTLVs(const uint8_t* buf, size_t len, RadarFrame& frame) {
   static uint32_t s_dbg_count = 0;
   const bool do_dbg = (s_dbg_count++ % 5 == 0);
 
+#if USB_PRINT_ENABLED
   if (do_dbg) {
     Serial.print("DBG frame len="); Serial.print((unsigned)len);
     Serial.print(" numObj="); Serial.print(u32le(h + 20));
     Serial.print(" numTLV="); Serial.println(u32le(h + 24));
   }
+#endif
 
   for (uint32_t ti = 0; ti < frame.numTLV && ptr + 8 <= end; ti++) {
     uint32_t tlvType = u32le(ptr);
@@ -222,15 +243,18 @@ static void parseTLVs(const uint8_t* buf, size_t len, RadarFrame& frame) {
     ptr += 8 + tlvLen;
     if (ptr > end) break;
 
+#if USB_PRINT_ENABLED
     if (do_dbg) {
       Serial.print("  TLV["); Serial.print(ti); Serial.print("] type=");
       Serial.print(tlvType); Serial.print(" len="); Serial.println(tlvLen);
     }
+#endif
 
     if (tlvType == 1) {
       // DETECTED_POINTS: assumed 16 bytes each — x(f32) y(f32) z(f32) v(f32)
       // TI TLV native frame: x= right, y= forward, z=up.
       uint32_t nPts = tlvLen / 16;
+#if USB_PRINT_ENABLED
       if (do_dbg) {
         Serial.print("  -> nPts="); Serial.print(nPts);
         Serial.print(" (tlvLen%16="); Serial.print(tlvLen % 16); Serial.println(")");
@@ -254,6 +278,7 @@ static void parseTLVs(const uint8_t* buf, size_t len, RadarFrame& frame) {
           Serial.print(" f32="); Serial.println(as_f32, 6);
         }
       }
+#endif
       for (uint32_t i = 0; i < nPts && frame.numRaw < RadarFrame::MAX_POINTS; i++) {
         const uint8_t* p = tlvData + i * 16;
         const float raw_x = f32le(p + 0);
@@ -275,7 +300,9 @@ bool xwr6843aopInit() {
   CLI.begin(CLI_BAUD);
   DATA.begin(DATA_BAUD);
 
+#if USB_PRINT_ENABLED
   Serial.println("Waiting 5s for radar boot...");
+#endif
   char bootBuf[1024];
   int bc = 0;
   uint32_t t0 = millis();
@@ -286,6 +313,7 @@ bool xwr6843aopInit() {
   }
   bootBuf[bc] = '\0';
 
+#if USB_PRINT_ENABLED
   Serial.print("CLI boot bytes ("); Serial.print(bc); Serial.print("): ");
   if (bc == 0) {
     Serial.println("(none)");
@@ -298,6 +326,7 @@ bool xwr6843aopInit() {
     Serial.println();
   }
   Serial.println("──────────────────────────────────");
+#endif
 
   return configure();
 }
@@ -315,10 +344,15 @@ void xwr6843aopUpdate(RadarFrame& frame) {
 }
 
 void xwr6843aopDrainCli() {
+#if USB_PRINT_ENABLED
   while (CLI.available()) Serial.print((char)CLI.read());
+#else
+  while (CLI.available()) CLI.read();
+#endif
 }
 
 void xwr6843aopPrintRaw(const RadarFrame& frame) {
+#if USB_PRINT_ENABLED
   Serial.print("RADAR RAW  obj="); Serial.print(frame.numObj);
   Serial.print("  tlvs=");         Serial.print(frame.numTLV);
   Serial.print("  raw=");          Serial.println(frame.numRaw);
@@ -333,4 +367,5 @@ void xwr6843aopPrintRaw(const RadarFrame& frame) {
     Serial.print("  vr="); Serial.print(p.vr, 3);
     Serial.println(" m/s");
   }
+#endif
 }

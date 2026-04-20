@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <common/mavlink.h>
 
 #undef B0
 #undef B1
@@ -9,6 +10,8 @@
 #include <rio/rio_eskf.h>
 #include "bmi08x.h"
 #include "xwr6843aop.h"
+
+#include "config.h"
 
 // ──────────────────────────────────────────────────────────────
 // IMU type selection — change this line to swap hardware
@@ -28,7 +31,7 @@ static rio::Params makeParams() {
 
   p.g_W = rio::Vec3(0.0f, 0.0f, -9.80665f);
 
-  p.sigma_acc = 3.2e-3f;    // 200 Hz ODR — retune empirically from here
+  p.sigma_acc = 2.2563e-3f;
   p.sigma_ba  = 2.2563e-4f;
 
   p.sigma_gyr = 2.443461e-4f;
@@ -49,7 +52,6 @@ static rio::Params makeParams() {
   p.gating_enable = true;
   p.gate_nsigma   = 5.0f;
   p.vr_sign       = 1.0f;
-
   return p;
 }
 
@@ -63,6 +65,83 @@ static constexpr float P0_diag[21] = {
   2.0e-5f, 2.0e-5f, 2.0e-5f, // radar position relative to IMU (m)
   1.0e-2f, 1.0e-2f, 1.0e-2f   , // radar attitude relative to IMU (rad)
 };
+
+// ──────────────────────────────────────────────────────────────
+// MAVLink odometry output (Serial2 → Telem1)
+// ──────────────────────────────────────────────────────────────
+static uint8_t mav_buf[MAVLINK_MAX_PACKET_LEN];
+
+// Fill the 21-element upper-triangle of a 6x6 covariance from selected rows/cols of P.
+// r[6] maps output row/col index → P matrix row/col index. NaN columns set that row/col to NaN.
+static void fillCov6(float out[21], const rio::Mat21& P,
+                     const int r[6], bool nan_col[6]) {
+  int k = 0;
+  for (int i = 0; i < 6; i++) {
+    for (int j = i; j < 6; j++, k++) {
+      if (nan_col[i] || nan_col[j]) {
+        out[k] = NAN;
+      } else {
+        out[k] = P(r[i], r[j]);
+      }
+    }
+  }
+}
+
+static void sendOdometry(const rio::NominalState& x, const rio::Mat21& P, float t_sec) {
+  // Frame transformation: ESKF world → NED
+  // 180° yaw then 180° roll = quaternion (w=0, x=1, y=0, z=0) = R: diag(1,-1,-1)
+  static const rio::Quat q_t(0.0f, 1.0f, 0.0f, 0.0f);  // Eigen (w,x,y,z)
+
+  const rio::Vec3 p_out = q_t * x.p_WI;
+  const rio::Vec3 v_out = q_t * x.v_WI;
+  const rio::Quat q_out = q_t * x.q_WI;
+
+  mavlink_odometry_t odom{};
+  odom.time_usec      = (uint64_t)(t_sec * 1e6f);
+  odom.frame_id       = MAV_FRAME_LOCAL_NED;
+  odom.child_frame_id = MAV_FRAME_BODY_FRD;
+
+  odom.x = p_out.x();
+  odom.y = p_out.y();
+  odom.z = p_out.z();
+
+  // Quaternion [w, x, y, z]
+  odom.q[0] = q_out.w();
+  odom.q[1] = q_out.x();
+  odom.q[2] = q_out.y();
+  odom.q[3] = q_out.z();
+
+  odom.vx = v_out.x();
+  odom.vy = v_out.y();
+  odom.vz = v_out.z();
+
+  // Angular velocity not available — mark unknown
+  odom.rollspeed  = NAN;
+  odom.pitchspeed = NAN;
+  odom.yawspeed   = NAN;
+
+  // pose_covariance: upper triangle of [pos(0:3), att(9:12)] from P
+  {
+    const int    r[6]       = {0, 1, 2, 9, 10, 11};
+    bool         nan_col[6] = {false, false, false, false, false, false};
+    fillCov6(odom.pose_covariance, P, r, nan_col);
+  }
+
+  // velocity_covariance: upper triangle of [vel(3:6), ang_vel=NaN]
+  {
+    const int    r[6]       = {3, 4, 5, 0, 0, 0};   // last 3 unused (NaN)
+    bool         nan_col[6] = {false, false, false, true, true, true};
+    fillCov6(odom.velocity_covariance, P, r, nan_col);
+  }
+
+  odom.reset_counter  = 0;
+  odom.estimator_type = MAV_ESTIMATOR_TYPE_VISION;
+
+  mavlink_message_t msg;
+  mavlink_msg_odometry_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &odom);
+  uint16_t len = mavlink_msg_to_send_buffer(mav_buf, &msg);
+  Serial2.write(mav_buf, len);
+}
 
 static bool  att_initialized  = false;
 static bool  time_initialized = false;
@@ -99,7 +178,9 @@ static void processImu(const rio::Vec3& f_b, const rio::Vec3& w_b) {
     if (!eskf.initAttitudeFromGravity(f_b, P0_diag, t)) return;
     att_initialized = true;
     last_t = t;
+#if USB_PRINT_ENABLED
     Serial.println("Attitude initialized from gravity");
+#endif
     return;
   }
 
@@ -134,15 +215,20 @@ static int ledState = 0;
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
 
+#if USB_PRINT_ENABLED
   Serial.begin(115200);
   while (!Serial) delay(10);
+#endif
+  Serial2.begin(921600);  // TX2/RX2 → Telem1
 
   // --- IMU ---
   Wire.begin();
   Wire.setClock(400000);
   bmi08xScanI2C();
   if (!bmi08xInit(IMU_TYPE)) {
+#if USB_PRINT_ENABLED
     Serial.println("BMI08x init failed");
+#endif
     while (1) delay(100);
   }
 
@@ -156,13 +242,19 @@ void setup() {
 
   // --- Radar ---
   if (!xwr6843aopInit()) {
+#if USB_PRINT_ENABLED
     Serial.println("Radar config failed");
+#endif
     while (1) delay(100); //TODO: try to recover?
   } else {
+#if USB_PRINT_ENABLED
     Serial.println("Radar configured OK!");
+#endif
   }
 
+#if USB_PRINT_ENABLED
   Serial.println("RIO ESKF ready");
+#endif
   digitalWrite(LED_BUILTIN, HIGH);
   ledState = 1;
 
@@ -197,7 +289,7 @@ void loop() {
   // --- Radar ---
   xwr6843aopDrainCli();
   xwr6843aopUpdate(radarFrame);
-  if (radarFrame.valid && radarFrame.numRaw > 0 && att_initialized) {
+  if (radarFrame.valid && radarFrame.numRaw > 0 && att_initialized) { 
     // xwr6843aopPrintRaw(radarFrame);
 
     static rio::RadarDoppler doppler[RadarFrame::MAX_POINTS];
@@ -222,7 +314,10 @@ void loop() {
     // }
 
     const auto& x = eskf.getState();
+    const auto& P = eskf.getCovariance();
+    sendOdometry(x, P, t_r);
 
+#if USB_PRINT_ENABLED
     // Position
     Serial.print("p_WI=[");
     Serial.print(x.p_WI.x(), 4); Serial.print(", ");
@@ -253,6 +348,7 @@ void loop() {
     Serial.print(x.b_g.x(), 6); Serial.print(", ");
     Serial.print(x.b_g.y(), 6); Serial.print(", ");
     Serial.print(x.b_g.z(), 6); Serial.println("]");
+#endif
 
     // // Radar-IMU translation extrinsic
     // Serial.print("p_IR=[");
@@ -288,10 +384,12 @@ void loop() {
   const uint32_t now_ms = millis();
   if (now_ms - s_rate_t_ms >= 1000) {
     const float dt_s = (now_ms - s_rate_t_ms) * 1e-3f;
+#if USB_PRINT_ENABLED
     Serial.print("RATES imu_hz=");
     Serial.print(s_imu_count   / dt_s, 1);
     Serial.print(" radar_hz=");
     Serial.println(s_radar_count / dt_s, 1);
+#endif
     s_imu_count   = 0;
     s_radar_count = 0;
     s_rate_t_ms   = now_ms;
