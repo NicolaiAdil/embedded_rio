@@ -12,13 +12,15 @@ static constexpr uint8_t GYR_ADDR = 0x69;
 // ──────────────────────────────────────────────────────────────
 static constexpr uint8_t REG_ACC_CHIP_ID  = 0x00;
 static constexpr uint8_t REG_ACC_X_LSB    = 0x12;
+static constexpr uint8_t REG_ACC_CONF     = 0x40;  // ODR and bandwidth
 static constexpr uint8_t REG_ACC_RANGE    = 0x41;
 static constexpr uint8_t REG_ACC_PWR_CONF = 0x7C;
 static constexpr uint8_t REG_ACC_PWR_CTRL = 0x7D;
 
-static constexpr uint8_t REG_GYR_CHIP_ID  = 0x00;
-static constexpr uint8_t REG_GYR_X_LSB    = 0x02;
-static constexpr uint8_t REG_GYR_RANGE    = 0x0F;
+static constexpr uint8_t REG_GYR_CHIP_ID   = 0x00;
+static constexpr uint8_t REG_GYR_X_LSB     = 0x02;
+static constexpr uint8_t REG_GYR_RANGE     = 0x0F;
+static constexpr uint8_t REG_GYR_BANDWIDTH = 0x10;  // ODR + filter bandwidth
 
 // ──────────────────────────────────────────────────────────────
 // Chip IDs
@@ -109,6 +111,13 @@ bool bmi08xInit(ImuType type) {
   if (!i2cWriteReg(ACC_ADDR, REG_ACC_RANGE, acc_range)) return false;
   delay(2);
 
+  // 200 Hz ODR, normal bandwidth (acc_bwp=0xA, acc_odr=0x9).
+  // Without this the BMI088 defaults to 100 Hz, causing the same accelerometer
+  // reading to be processed multiple times per poll cycle, which inflates the
+  // velocity process noise and produces velocity oscillations at rest.
+  if (!i2cWriteReg(ACC_ADDR, REG_ACC_CONF, 0xA9)) return false;
+  delay(2);
+
   // --- Gyroscope (chip ID identical for both parts) ---
   if (!i2cReadReg(GYR_ADDR, REG_GYR_CHIP_ID, id)) return false;
   Serial.print("Gyro  chip ID: 0x"); Serial.println(id, HEX);
@@ -118,6 +127,13 @@ bool bmi08xInit(ImuType type) {
   }
 
   if (!i2cWriteReg(GYR_ADDR, REG_GYR_RANGE, GYR_RANGE_REG_VAL)) return false;
+  delay(2);
+
+  // 200 Hz ODR, 64 Hz filter bandwidth.
+  // Default is 0x00 (2000 Hz, 532 Hz BW). Options at 200 Hz:
+  //   0x04 = 200 Hz ODR, 23 Hz BW  (very smooth, high latency)
+  //   0x06 = 200 Hz ODR, 64 Hz BW  (good balance for drone dynamics)
+  if (!i2cWriteReg(GYR_ADDR, REG_GYR_BANDWIDTH, 0x06)) return false;
   delay(2);
 
   s_i2c_ok = true;
