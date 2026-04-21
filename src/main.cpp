@@ -43,14 +43,12 @@ static rio::Params makeParams() {
   p.min_dt = 1e-4f;
   p.max_dt = 0.1f;
 
-  // Radar frame: x=forward, y=right, z=down (FRU).
-  // IMU frame:   x=forward, y=right, z=up  (FRU).
   p.q_IR = rio::Quat(0.68301f, -0.18301f, -0.18301f, 0.68301f);  // Eigen (w,x,y,z)
   // p.p_IR = rio::Vec3(-0.065f, 0.043f, 0.020f);
   p.p_IR = rio::Vec3(-0.4251f, 0.040737f, 0.009330f);
   p.sigma_vr      = 0.058f; // 0.038f
   p.gating_enable = true;
-  p.gate_nsigma   = 5.0f;
+  p.gate_nsigma   = 3.0f;
   p.vr_sign       = 1.0f;
   return p;
 }
@@ -58,10 +56,10 @@ static rio::Params makeParams() {
 // Initial uncertainties for the error states
 static constexpr float P0_diag[21] = {
   1e-6f  , 1e-6f  , 1e-6f  , // ego position (m)
-  1e-2f  , 1e-2f  , 1e-2f  , // ego velocity (m/s)
-  1e-4f  , 1e-4f  , 1e-4f  , // accelerometer bias (m/s²)
+  1e-1f  , 1e-1f  , 1e-1f  , // ego velocity (m/s)
+  1e-2f  , 1e-2f  , 1e-2f  , // accelerometer bias (m/s²)
   1.1e-3f, 1.1e-3f, 1e-8f , // ego attitude (rad): roll/pitch from gravity, yaw unknown
-  1e-5f  , 1e-5f  , 1e-5f  , // gyroscope bias (rad/s)
+  1e-4f  , 1e-4f  , 1e-4f  , // gyroscope bias (rad/s)
   2.0e-5f, 2.0e-5f, 2.0e-5f, // radar position relative to IMU (m)
   1.0e-2f, 1.0e-2f, 1.0e-2f   , // radar attitude relative to IMU (rad)
 };
@@ -88,13 +86,12 @@ static void fillCov6(float out[21], const rio::Mat21& P,
 }
 
 static void sendOdometry(const rio::NominalState& x, const rio::Mat21& P, float t_sec) {
-  // Frame transformation: ESKF world → NED
-  // 180° yaw then 180° roll = quaternion (w=0, x=1, y=0, z=0) = R: diag(1,-1,-1)
-  static const rio::Quat q_t(0.0f, 1.0f, 0.0f, 0.0f);  // Eigen (w,x,y,z)
+  // 180° pitch = quaternion (w=0, x=0, y=1, z=0)
+  static const rio::Quat q_t(0.0f, 0.0f, 1.0f, 0.0f);  // Eigen (w,x,y,z)
 
   const rio::Vec3 p_out = q_t * x.p_WI;
   const rio::Vec3 v_out = q_t * x.v_WI;
-  const rio::Quat q_out = q_t * x.q_WI;
+  const rio::Quat q_out = q_t * x.q_WI * q_t.inverse();
 
   mavlink_odometry_t odom{};
   odom.time_usec      = (uint64_t)(t_sec * 1e6f);
@@ -315,9 +312,9 @@ void loop() {
 
     const auto& x = eskf.getState();
     const auto& P = eskf.getCovariance();
+#if !USB_PRINT_ENABLED
     sendOdometry(x, P, t_r);
-
-#if USB_PRINT_ENABLED
+#else
     // Position
     Serial.print("p_WI=[");
     Serial.print(x.p_WI.x(), 4); Serial.print(", ");
