@@ -13,6 +13,116 @@
 
 #include "config.h"
 
+#if SD_LOG_ENABLED
+#include <SD.h>
+
+// ──────────────────────────────────────────────────────────────
+// SD logger
+// Log format (CSV):
+//   I,<t_ms>,<ax>,<ay>,<az>,<gx>,<gy>,<gz>   — IMU sample
+//   R,<t_ms>,<x>,<y>,<z>,<vr>                 — one radar point per line
+// All R rows with the same t_ms belong to one radar frame.
+// Replay with scripts/replay_log.py.
+// ──────────────────────────────────────────────────────────────
+static File s_logfile;
+
+// Write buffer: accumulate log data in RAM and flush to SD in 512-byte sector-
+// aligned chunks. This keeps individual SD write calls off the hot path so they
+// never block the I2C bus mid-sample.
+static constexpr size_t SD_BUF_SIZE = 2048;
+static uint8_t  s_sd_buf[SD_BUF_SIZE];
+static size_t   s_sd_buf_len = 0;
+
+// Append bytes to the RAM buffer; flush one or more 512-byte sectors when full.
+static void sdWrite(const char* data, int len) {
+  if (len <= 0 || !s_logfile) return;
+  const uint8_t* src = reinterpret_cast<const uint8_t*>(data);
+  while (len > 0) {
+    size_t space = SD_BUF_SIZE - s_sd_buf_len;
+    size_t chunk = (size_t)len < space ? (size_t)len : space;
+    memcpy(s_sd_buf + s_sd_buf_len, src, chunk);
+    s_sd_buf_len += chunk;
+    src += chunk;
+    len -= (int)chunk;
+    // Flush in 512-byte sectors to stay aligned with FAT block writes.
+    if (s_sd_buf_len >= 512) {
+      size_t to_write = (s_sd_buf_len / 512) * 512;
+      s_logfile.write(s_sd_buf, to_write);
+      size_t remaining = s_sd_buf_len - to_write;
+      if (remaining) memmove(s_sd_buf, s_sd_buf + to_write, remaining);
+      s_sd_buf_len = remaining;
+    }
+  }
+}
+
+// Force remaining buffered bytes to disk (call once per second).
+static void sdFlush() {
+  if (!s_logfile) return;
+  if (s_sd_buf_len > 0) {
+    s_logfile.write(s_sd_buf, s_sd_buf_len);
+    s_sd_buf_len = 0;
+  }
+  s_logfile.flush();
+}
+
+// Scratch buffer for snprintf — one line at a time, never touches SD directly.
+static char s_log_line[160];
+
+static void sdLogInit() {
+  if (!SD.begin(BUILTIN_SDCARD)) {
+#if USB_PRINT_ENABLED
+    Serial.println("SD init failed");
+#endif
+    return;
+  }
+  char name[16];
+  for (int i = 0; i < 10000; i++) {
+    snprintf(name, sizeof(name), "LOG%04d.CSV", i);
+    if (!SD.exists(name)) {
+      s_logfile = SD.open(name, FILE_WRITE);
+      break;
+    }
+  }
+  if (!s_logfile) {
+#if USB_PRINT_ENABLED
+    Serial.println("SD open failed");
+#endif
+    return;
+  }
+  // Write header directly — happens once at startup, blocking is fine here.
+  s_logfile.println("# RIO data log");
+  s_logfile.println("# I,t_ms,ax,ay,az,gx,gy,gz");
+  s_logfile.println("# R,t_ms,x,y,z,vr");
+  s_logfile.flush();
+#if USB_PRINT_ENABLED
+  Serial.print("Logging to "); Serial.println(name);
+#endif
+}
+
+static void sdLogImu(uint32_t t_ms, const rio::Vec3& acc, const rio::Vec3& gyr) {
+  int n = snprintf(s_log_line, sizeof(s_log_line),
+    "I,%lu,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
+    (unsigned long)t_ms,
+    acc.x(), acc.y(), acc.z(),
+    gyr.x(), gyr.y(), gyr.z());
+  sdWrite(s_log_line, (n > 0 && n < (int)sizeof(s_log_line)) ? n : (int)sizeof(s_log_line) - 1);
+}
+
+static void sdLogRadar(uint32_t t_ms, const RadarFrame& frame) {
+  for (uint32_t i = 0; i < frame.numRaw; i++) {
+    const float x  = frame.raw[i].x;
+    const float y  = frame.raw[i].y;
+    const float z  = frame.raw[i].z;
+    const float vr = frame.raw[i].vr;
+    if (!isfinite(x) || !isfinite(y) || !isfinite(z) || !isfinite(vr)) continue;
+    int n = snprintf(s_log_line, sizeof(s_log_line),
+      "R,%lu,%.6g,%.6g,%.6g,%.6g\n",
+      (unsigned long)t_ms, x, y, z, vr);
+    sdWrite(s_log_line, (n > 0 && n < (int)sizeof(s_log_line)) ? n : (int)sizeof(s_log_line) - 1);
+  }
+}
+#endif  // SD_LOG_ENABLED
+
 // ──────────────────────────────────────────────────────────────
 // IMU type selection — change this line to swap hardware
 // ──────────────────────────────────────────────────────────────
@@ -48,7 +158,7 @@ static rio::Params makeParams() {
   p.p_IR = rio::Vec3(-0.4251f, 0.040737f, 0.009330f);
   p.sigma_vr      = 0.058f; // 0.038f
   p.gating_enable = true;
-  p.gate_nsigma   = 3.0f;
+  p.gate_nsigma   = 10.0f;
   p.vr_sign       = 1.0f;
   return p;
 }
@@ -57,9 +167,9 @@ static rio::Params makeParams() {
 static constexpr float P0_diag[21] = {
   1e-6f  , 1e-6f  , 1e-6f  , // ego position (m)
   1e-1f  , 1e-1f  , 1e-1f  , // ego velocity (m/s)
-  1e-2f  , 1e-2f  , 1e-2f  , // accelerometer bias (m/s²)
+  1e-4f  , 1e-4f  , 1e-4f  , // accelerometer bias (m/s²)
   1.1e-3f, 1.1e-3f, 1e-8f , // ego attitude (rad): roll/pitch from gravity, yaw unknown
-  1e-4f  , 1e-4f  , 1e-4f  , // gyroscope bias (rad/s)
+  1e-5f  , 1e-5f  , 1e-5f  , // gyroscope bias (rad/s)
   2.0e-5f, 2.0e-5f, 2.0e-5f, // radar position relative to IMU (m)
   1.0e-2f, 1.0e-2f, 1.0e-2f   , // radar attitude relative to IMU (rad)
 };
@@ -95,6 +205,7 @@ static void sendOdometry(const rio::NominalState& x, const rio::Mat21& P, float 
 
   mavlink_odometry_t odom{};
   odom.time_usec      = (uint64_t)(t_sec * 1e6f);
+  // odom.time_usec = 0;  // use 0 to indicate "unknown" timestamp, so that companion can use reception time instead
   odom.frame_id       = MAV_FRAME_LOCAL_NED;
   odom.child_frame_id = MAV_FRAME_BODY_FRD;
 
@@ -153,6 +264,13 @@ static constexpr uint32_t IMU_PERIOD_US   = 1000000UL / IMU_HZ;
 static uint32_t s_imu_last_us             = 0;
 
 // ──────────────────────────────────────────────────────────────
+// Odometry output rate limiter
+// ──────────────────────────────────────────────────────────────
+static constexpr uint32_t ODOM_HZ         = 50;
+static constexpr uint32_t ODOM_PERIOD_US  = 1000000UL / ODOM_HZ;
+static uint32_t s_odom_last_us            = 0;
+
+// ──────────────────────────────────────────────────────────────
 // Rate tracking
 // ──────────────────────────────────────────────────────────────
 static uint32_t s_imu_count   = 0;
@@ -200,6 +318,10 @@ static void processImu(const rio::Vec3& f_b, const rio::Vec3& w_b) {
     eskf.insPropagation(s, dt);
   }
 
+#if SD_LOG_ENABLED
+  sdLogImu(millis(), f_b, w_b);
+#endif
+
   s_imu_count++;
 }
 
@@ -215,6 +337,8 @@ void setup() {
 #if USB_PRINT_ENABLED
   Serial.begin(115200);
   while (!Serial) delay(10);
+#else
+  delay(50);  // allow 5V rail and peripherals to stabilise before I2C/UART init
 #endif
   Serial2.begin(921600);  // TX2/RX2 → Telem1
 
@@ -252,6 +376,11 @@ void setup() {
 #if USB_PRINT_ENABLED
   Serial.println("RIO ESKF ready");
 #endif
+
+#if SD_LOG_ENABLED
+  sdLogInit();
+#endif
+
   digitalWrite(LED_BUILTIN, HIGH);
   ledState = 1;
 
@@ -303,18 +432,20 @@ void loop() {
     rio::CorrectionResult res = eskf.correct(doppler, radarFrame.numRaw, last_imu);
     s_radar_count++;
 
-    // if (res.n_rejected > 0) {
-    //   Serial.print("ESKF correct: ");
-    //   Serial.print(res.n_accepted); Serial.print(" accepted, ");
-    //   Serial.print(res.n_rejected); Serial.print(" rejected, ");
-    //   Serial.print(res.n_skipped);  Serial.println(" skipped");
-    // }
+#if SD_LOG_ENABLED
+    sdLogRadar((uint32_t)(t_r * 1000.0f), radarFrame);
+#endif
+
+    if (res.n_rejected > 0) {
+      Serial.print("ESKF correct: ");
+      Serial.print(res.n_accepted); Serial.print(" accepted, ");
+      Serial.print(res.n_rejected); Serial.print(" rejected, ");
+      Serial.print(res.n_skipped);  Serial.println(" skipped");
+    }
 
     const auto& x = eskf.getState();
     const auto& P = eskf.getCovariance();
-#if !USB_PRINT_ENABLED
-    sendOdometry(x, P, t_r);
-#else
+#if USB_PRINT_ENABLED
     // Position
     Serial.print("p_WI=[");
     Serial.print(x.p_WI.x(), 4); Serial.print(", ");
@@ -377,7 +508,16 @@ void loop() {
     // Serial.print(s(20),4); Serial.println("]");
   }
 
-  // --- Rate logging (once per second) ---
+  // --- Odometry output at ODOM_HZ ---
+  if (att_initialized && now_us - s_odom_last_us >= ODOM_PERIOD_US) {
+    s_odom_last_us = now_us;
+    const float t_odom = static_cast<float>(millis()) * 1e-3f;
+#if !USB_PRINT_ENABLED
+    sendOdometry(eskf.getState(), eskf.getCovariance(), t_odom);
+#endif
+  }
+
+  // --- Rate logging + SD flush (once per second) ---
   const uint32_t now_ms = millis();
   if (now_ms - s_rate_t_ms >= 1000) {
     const float dt_s = (now_ms - s_rate_t_ms) * 1e-3f;
@@ -390,5 +530,8 @@ void loop() {
     s_imu_count   = 0;
     s_radar_count = 0;
     s_rate_t_ms   = now_ms;
+#if SD_LOG_ENABLED
+    sdFlush();
+#endif
   }
 }
