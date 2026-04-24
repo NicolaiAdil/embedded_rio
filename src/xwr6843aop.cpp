@@ -15,6 +15,7 @@
 // static constexpr size_t NUM_CFG = NUM_CFG_ICINS2021;
 
 // ── Radar configuration commands (AWR6843AOP) ────────────────
+// Profile: best_vel_res, 60 GHz, Range=10.95m, Vel=10.24m/s, 30Hz
 static const char* const CFG[] = {
   "sensorStop",
   "configDataPort 921600 1",  // keep: sets DATA UART to 921600 baud
@@ -24,28 +25,29 @@ static const char* const CFG[] = {
   "channelCfg 15 7 0",
   "adcCfg 2 1",
   "adcbufCfg -1 0 1 1 1",
-  "profileCfg 0 60 133 7 40 0 0 100 1 128 8000 0 0 158", // "profileCfg 0 60 133 7 40 0 0 100 1 128 8000 0 0 158",
+  "profileCfg 0 60 28 7 15 0 0 100 1 64 9142 0 0 158",
   "chirpCfg 0 0 0 0 0 0 0 1",
   "chirpCfg 1 1 0 0 0 0 0 2",
   "chirpCfg 2 2 0 0 0 0 0 4",
-  "frameCfg 0 2 32 0 40 1 0",  // triggerSelect=1 (software): Teensy has no HW trigger GPIO
+  "frameCfg 0 2 128 0 40 1 0",
   "lowPower 0 0",
-  "guiMonitor -1 2 0 0 0 0 0",
+  "guiMonitor -1 1 0 0 0 0 1",
   "cfarCfg -1 0 2 8 4 3 0 8 0",
-  "cfarCfg -1 1 0 4 2 3 1 20 1",
+  "cfarCfg -1 1 0 4 2 3 1 18 1",
   "multiObjBeamForming -1 1 0.5",
   "clutterRemoval -1 0",
   "calibDcRangeSig -1 0 -5 8 256",
   "extendedMaxVelocity -1 0",
   "lvdsStreamCfg -1 0 0 0",
-  "compRangeBiasAndRxChanPhase 0.0547942 -0.21072 -0.70407 0.08740 0.69629 -0.13940 -0.74902 0.14636 0.69608 -0.37207 -0.89261 0.17529 0.88217 -0.29736 -0.90204 0.31693 0.84238 -0.59573 -0.77765 0.42157 0.84186 -0.52802 -0.84924 0.51184 0.77029",
   "measureRangeBiasAndRxChanPhase 0 1.5 0.2",
-  "CQRxSatMonitor 0 3 4 99 0",
-  "CQSigImgMonitor 0 127 4",
+  // "compRangeBiasAndRxChanPhase 0.0477476 -0.86185 -0.19427 0.74423 0.34024 -0.78278 -0.02762 0.9888 0.14932 -0.84396 -0.10913 0.75107 0.27271 -0.76791 0.04971 0.95764 0.0405 -0.80664 0.29758 0.80481 -0.12469 -0.66364 0.41531 0.86923 -0.40482",
+  "compRangeBiasAndRxChanPhase 0.0 1 0 -1 0 1 0 -1 0 1 0 -1 0 1 0 -1 0 1 0 -1 0 1 0 -1 0",
+  "CQRxSatMonitor 0 3 4 19 0",
+  "CQSigImgMonitor 0 31 4",
   "analogMonitor 0 0",
   "aoaFovCfg -1 -60 60 -60 60",
-  "cfarFovCfg -1 0 0.1 9.60",
-  "cfarFovCfg -1 1 -2.4 2.40",
+  "cfarFovCfg -1 0 0 10.97",
+  "cfarFovCfg -1 1 -9.68 9.68",
   "calibData 0 0 0",
   "sensorStart",
 };

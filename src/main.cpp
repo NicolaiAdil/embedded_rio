@@ -40,15 +40,16 @@ static rio::Params makeParams() {
   p.tau_ba = 700.0f;
   p.tau_bg = 450.0f;
 
-  p.min_dt = 1e-4f;
+  p.min_dt = 1e-6f;
   p.max_dt = 0.1f;
 
   p.q_IR = rio::Quat(0.68301f, -0.18301f, -0.18301f, 0.68301f);  // Eigen (w,x,y,z)
   // p.p_IR = rio::Vec3(-0.065f, 0.043f, 0.020f);
-  p.p_IR = rio::Vec3(-0.4251f, 0.040737f, 0.009330f);
+  p.p_IR = rio::Vec3(-0.065f, 0.025013f, 0.020f);
+  // p.p_IR = rio::Vec3(0.0f, 0.0f, 0.0f);
   p.sigma_vr      = 0.058f; // 0.038f
   p.gating_enable = true;
-  p.gate_nsigma   = 3.0f;
+  p.gate_nsigma   = 5.0f;
   p.vr_sign       = 1.0f;
   return p;
 }
@@ -57,9 +58,9 @@ static rio::Params makeParams() {
 static constexpr float P0_diag[21] = {
   1e-6f  , 1e-6f  , 1e-6f  , // ego position (m)
   1e-1f  , 1e-1f  , 1e-1f  , // ego velocity (m/s)
-  1e-2f  , 1e-2f  , 1e-2f  , // accelerometer bias (m/s²)
+  1e-4f  , 1e-4f  , 1e-4f  , // accelerometer bias (m/s²)
   1.1e-3f, 1.1e-3f, 1e-8f , // ego attitude (rad): roll/pitch from gravity, yaw unknown
-  1e-4f  , 1e-4f  , 1e-4f  , // gyroscope bias (rad/s)
+  1e-5f  , 1e-5f  , 1e-5f  , // gyroscope bias (rad/s)
   2.0e-5f, 2.0e-5f, 2.0e-5f, // radar position relative to IMU (m)
   1.0e-2f, 1.0e-2f, 1.0e-2f   , // radar attitude relative to IMU (rad)
 };
@@ -90,7 +91,7 @@ static void sendOdometry(const rio::NominalState& x, const rio::Mat21& P, float 
   static const rio::Quat q_t(0.0f, 0.0f, 1.0f, 0.0f);  // Eigen (w,x,y,z)
 
   const rio::Vec3 p_out = q_t * x.p_WI;
-  const rio::Vec3 v_out = q_t * x.v_WI;
+  const rio::Vec3 v_body = q_t * (x.q_WI.inverse() * x.v_WI);
   const rio::Quat q_out = q_t * x.q_WI * q_t.inverse();
 
   mavlink_odometry_t odom{};
@@ -108,9 +109,9 @@ static void sendOdometry(const rio::NominalState& x, const rio::Mat21& P, float 
   odom.q[2] = q_out.y();
   odom.q[3] = q_out.z();
 
-  odom.vx = v_out.x();
-  odom.vy = v_out.y();
-  odom.vz = v_out.z();
+  odom.vx = v_body.x();
+  odom.vy = v_body.y();
+  odom.vz = v_body.z();
 
   // Angular velocity not available — mark unknown
   odom.rollspeed  = NAN;
@@ -303,12 +304,12 @@ void loop() {
     rio::CorrectionResult res = eskf.correct(doppler, radarFrame.numRaw, last_imu);
     s_radar_count++;
 
-    // if (res.n_rejected > 0) {
-    //   Serial.print("ESKF correct: ");
-    //   Serial.print(res.n_accepted); Serial.print(" accepted, ");
-    //   Serial.print(res.n_rejected); Serial.print(" rejected, ");
-    //   Serial.print(res.n_skipped);  Serial.println(" skipped");
-    // }
+    if (res.n_rejected > 0) {
+      Serial.print("ESKF correct: ");
+      Serial.print(res.n_accepted); Serial.print(" accepted, ");
+      Serial.print(res.n_rejected); Serial.print(" rejected, ");
+      Serial.print(res.n_skipped);  Serial.println(" skipped");
+    }
 
     const auto& x = eskf.getState();
     const auto& P = eskf.getCovariance();
@@ -345,36 +346,36 @@ void loop() {
     Serial.print(x.b_g.x(), 6); Serial.print(", ");
     Serial.print(x.b_g.y(), 6); Serial.print(", ");
     Serial.print(x.b_g.z(), 6); Serial.println("]");
-#endif
 
-    // // Radar-IMU translation extrinsic
-    // Serial.print("p_IR=[");
-    // Serial.print(x.p_IR.x(), 6); Serial.print(", ");
-    // Serial.print(x.p_IR.y(), 6); Serial.print(", ");
-    // Serial.print(x.p_IR.z(), 6); Serial.println("]");
+    // Radar-IMU translation extrinsic
+    Serial.print("p_IR=[");
+    Serial.print(x.p_IR.x(), 6); Serial.print(", ");
+    Serial.print(x.p_IR.y(), 6); Serial.print(", ");
+    Serial.print(x.p_IR.z(), 6); Serial.println("]");
 
-    // // Radar-IMU rotation extrinsic
-    // Serial.print("q_IR=[");
-    // Serial.print(x.q_IR.w(), 6); Serial.print(", ");
-    // Serial.print(x.q_IR.x(), 6); Serial.print(", ");
-    // Serial.print(x.q_IR.y(), 6); Serial.print(", ");
-    // Serial.print(x.q_IR.z(), 6); Serial.println("]");
+    // Radar-IMU rotation extrinsic
+    Serial.print("q_IR=[");
+    Serial.print(x.q_IR.w(), 6); Serial.print(", ");
+    Serial.print(x.q_IR.x(), 6); Serial.print(", ");
+    Serial.print(x.q_IR.y(), 6); Serial.print(", ");
+    Serial.print(x.q_IR.z(), 6); Serial.println("]");
 
     // Covariance std devs — per group: avg(σ_x,σ_y) | σ_z
     // const auto& P = eskf.getCovariance();
-    // auto s = [&](int i){ return sqrtf(fabsf(P(i,i))); };
-    // auto xy = [&](int i){ return 0.5f*(s(i)+s(i+1)); };
-    // // p    v    b_a  att  b_g  p_IR q_IR
-    // Serial.print("cov_xy=[");
-    // Serial.print(xy( 0),4); Serial.print(", "); Serial.print(xy( 3),4); Serial.print(", ");
-    // Serial.print(xy( 6),4); Serial.print(", "); Serial.print(xy( 9),4); Serial.print(", ");
-    // Serial.print(xy(12),4); Serial.print(", "); Serial.print(xy(15),4); Serial.print(", ");
-    // Serial.print(xy(18),4); Serial.println("]");
-    // Serial.print("cov_z= [");
-    // Serial.print(s( 2),4); Serial.print(", "); Serial.print(s( 5),4); Serial.print(", ");
-    // Serial.print(s( 8),4); Serial.print(", "); Serial.print(s(11),4); Serial.print(", ");
-    // Serial.print(s(14),4); Serial.print(", "); Serial.print(s(17),4); Serial.print(", ");
-    // Serial.print(s(20),4); Serial.println("]");
+    auto s = [&](int i){ return sqrtf(fabsf(P(i,i))); };
+    auto xy = [&](int i){ return 0.5f*(s(i)+s(i+1)); };
+    // p    v    b_a  att  b_g  p_IR q_IR
+    Serial.print("cov_xy=[");
+    Serial.print(xy( 0),4); Serial.print(", "); Serial.print(xy( 3),4); Serial.print(", ");
+    Serial.print(xy( 6),4); Serial.print(", "); Serial.print(xy( 9),4); Serial.print(", ");
+    Serial.print(xy(12),4); Serial.print(", "); Serial.print(xy(15),4); Serial.print(", ");
+    Serial.print(xy(18),4); Serial.println("]");
+    Serial.print("cov_z= [");
+    Serial.print(s( 2),4); Serial.print(", "); Serial.print(s( 5),4); Serial.print(", ");
+    Serial.print(s( 8),4); Serial.print(", "); Serial.print(s(11),4); Serial.print(", ");
+    Serial.print(s(14),4); Serial.print(", "); Serial.print(s(17),4); Serial.print(", ");
+    Serial.print(s(20),4); Serial.println("]");
+  #endif
   }
 
   // --- Rate logging (once per second) ---
