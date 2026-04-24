@@ -6,6 +6,7 @@
 #undef B3
 
 #include "xwr6843aop.h"
+#include "config.h"
 #include <string.h>
 #include <math.h>
 
@@ -14,6 +15,7 @@
 // static constexpr size_t NUM_CFG = NUM_CFG_ICINS2021;
 
 // ── Radar configuration commands (AWR6843AOP) ────────────────
+// Profile: best_vel_res, 60 GHz, Range=10.95m, Vel=10.24m/s, 30Hz
 static const char* const CFG[] = {
   "sensorStop",
   "configDataPort 921600 1",  // keep: sets DATA UART to 921600 baud
@@ -23,28 +25,29 @@ static const char* const CFG[] = {
   "channelCfg 15 7 0",
   "adcCfg 2 1",
   "adcbufCfg -1 0 1 1 1",
-  "profileCfg 0 60 133 7 40 0 0 100 1 128 8000 0 0 158", // "profileCfg 0 60 133 7 40 0 0 100 1 128 8000 0 0 158",
+  "profileCfg 0 60 28 7 15 0 0 100 1 64 9142 0 0 158",
   "chirpCfg 0 0 0 0 0 0 0 1",
   "chirpCfg 1 1 0 0 0 0 0 2",
   "chirpCfg 2 2 0 0 0 0 0 4",
-  "frameCfg 0 2 32 0 40 1 0",  // triggerSelect=1 (software): Teensy has no HW trigger GPIO
+  "frameCfg 0 2 128 0 40 1 0",
   "lowPower 0 0",
-  "guiMonitor -1 2 0 0 0 0 0",
+  "guiMonitor -1 1 0 0 0 0 1",
   "cfarCfg -1 0 2 8 4 3 0 8 0",
-  "cfarCfg -1 1 0 4 2 3 1 20 1",
+  "cfarCfg -1 1 0 4 2 3 1 18 1",
   "multiObjBeamForming -1 1 0.5",
   "clutterRemoval -1 0",
   "calibDcRangeSig -1 0 -5 8 256",
   "extendedMaxVelocity -1 0",
   "lvdsStreamCfg -1 0 0 0",
-  "compRangeBiasAndRxChanPhase 0.0547942 -0.21072 -0.70407 0.08740 0.69629 -0.13940 -0.74902 0.14636 0.69608 -0.37207 -0.89261 0.17529 0.88217 -0.29736 -0.90204 0.31693 0.84238 -0.59573 -0.77765 0.42157 0.84186 -0.52802 -0.84924 0.51184 0.77029",
   "measureRangeBiasAndRxChanPhase 0 1.5 0.2",
-  "CQRxSatMonitor 0 3 4 99 0",
-  "CQSigImgMonitor 0 127 4",
+  // "compRangeBiasAndRxChanPhase 0.0477476 -0.86185 -0.19427 0.74423 0.34024 -0.78278 -0.02762 0.9888 0.14932 -0.84396 -0.10913 0.75107 0.27271 -0.76791 0.04971 0.95764 0.0405 -0.80664 0.29758 0.80481 -0.12469 -0.66364 0.41531 0.86923 -0.40482",
+  "compRangeBiasAndRxChanPhase 0.0 1 0 -1 0 1 0 -1 0 1 0 -1 0 1 0 -1 0 1 0 -1 0 1 0 -1 0",
+  "CQRxSatMonitor 0 3 4 19 0",
+  "CQSigImgMonitor 0 31 4",
   "analogMonitor 0 0",
   "aoaFovCfg -1 -60 60 -60 60",
-  "cfarFovCfg -1 0 0.1 9.60",
-  "cfarFovCfg -1 1 -2.4 2.40",
+  "cfarFovCfg -1 0 0 10.97",
+  "cfarFovCfg -1 1 -9.68 9.68",
   "calibData 0 0 0",
   "sensorStart",
 };
@@ -80,7 +83,9 @@ static inline float f32le(const uint8_t* p) {
 
 
 static bool sendCmd(const char* cmd, uint32_t timeout_ms = 2000) {
+#if USB_PRINT_ENABLED
   Serial.print("[TX] "); Serial.println(cmd);
+#endif
   CLI.print(cmd); CLI.print("\r\n"); CLI.flush();
 
   uint32_t t0 = millis();
@@ -93,13 +98,20 @@ static bool sendCmd(const char* cmd, uint32_t timeout_ms = 2000) {
       if (n < sizeof(buf) - 1) buf[n++] = c;
       buf[n] = '\0';
       if (strstr(buf, "Done") || strstr(buf, "done")) {
-        Serial.print("[RX] "); Serial.println(buf); return true;
+#if USB_PRINT_ENABLED
+        Serial.print("[RX] "); Serial.println(buf);
+#endif
+        return true;
       }
       if (strstr(buf, "Error") || strstr(buf, "error")) {
-        Serial.print("[RX] "); Serial.println(buf); return false;
+#if USB_PRINT_ENABLED
+        Serial.print("[RX] "); Serial.println(buf);
+#endif
+        return false;
       }
     }
   }
+#if USB_PRINT_ENABLED
   Serial.print("[RX] TIMEOUT ("); Serial.print(n); Serial.print("B): ");
   for (size_t i = 0; i < n; i++) {
     uint8_t b = (uint8_t)buf[i];
@@ -107,26 +119,35 @@ static bool sendCmd(const char* cmd, uint32_t timeout_ms = 2000) {
     else { Serial.print("<0x"); Serial.print(b, HEX); Serial.print(">"); }
   }
   Serial.println();
+#endif
   return false;
 }
 
 static bool configure() {
+#if USB_PRINT_ENABLED
   Serial.println("Sending radar config...");
+#endif
   for (size_t i = 0; i < NUM_CFG; i++) {
     bool ok = sendCmd(CFG[i]);
     if (!ok && strcmp(CFG[i], "sensorStop") == 0) {
+#if USB_PRINT_ENABLED
       Serial.println("  (sensorStop fail is OK)");
+#endif
       delay(50);
       while (CLI.available()) CLI.read();
       continue;
     }
     if (!ok) {
+#if USB_PRINT_ENABLED
       Serial.print(">>> FAILED at: "); Serial.println(CFG[i]);
+#endif
       return false;
     }
     delay(20);
   }
+#if USB_PRINT_ENABLED
   Serial.println("All config commands accepted!");
+#endif
   return true;
 }
 
@@ -209,11 +230,13 @@ static void parseTLVs(const uint8_t* buf, size_t len, RadarFrame& frame) {
   static uint32_t s_dbg_count = 0;
   const bool do_dbg = (s_dbg_count++ % 5 == 0);
 
+#if USB_PRINT_ENABLED
   if (do_dbg) {
     Serial.print("DBG frame len="); Serial.print((unsigned)len);
     Serial.print(" numObj="); Serial.print(u32le(h + 20));
     Serial.print(" numTLV="); Serial.println(u32le(h + 24));
   }
+#endif
 
   for (uint32_t ti = 0; ti < frame.numTLV && ptr + 8 <= end; ti++) {
     uint32_t tlvType = u32le(ptr);
@@ -222,15 +245,18 @@ static void parseTLVs(const uint8_t* buf, size_t len, RadarFrame& frame) {
     ptr += 8 + tlvLen;
     if (ptr > end) break;
 
+#if USB_PRINT_ENABLED
     if (do_dbg) {
       Serial.print("  TLV["); Serial.print(ti); Serial.print("] type=");
       Serial.print(tlvType); Serial.print(" len="); Serial.println(tlvLen);
     }
+#endif
 
     if (tlvType == 1) {
       // DETECTED_POINTS: assumed 16 bytes each — x(f32) y(f32) z(f32) v(f32)
       // TI TLV native frame: x= right, y= forward, z=up.
       uint32_t nPts = tlvLen / 16;
+#if USB_PRINT_ENABLED
       if (do_dbg) {
         Serial.print("  -> nPts="); Serial.print(nPts);
         Serial.print(" (tlvLen%16="); Serial.print(tlvLen % 16); Serial.println(")");
@@ -254,6 +280,7 @@ static void parseTLVs(const uint8_t* buf, size_t len, RadarFrame& frame) {
           Serial.print(" f32="); Serial.println(as_f32, 6);
         }
       }
+#endif
       for (uint32_t i = 0; i < nPts && frame.numRaw < RadarFrame::MAX_POINTS; i++) {
         const uint8_t* p = tlvData + i * 16;
         const float raw_x = f32le(p + 0);
@@ -275,7 +302,9 @@ bool xwr6843aopInit() {
   CLI.begin(CLI_BAUD);
   DATA.begin(DATA_BAUD);
 
+#if USB_PRINT_ENABLED
   Serial.println("Waiting 5s for radar boot...");
+#endif
   char bootBuf[1024];
   int bc = 0;
   uint32_t t0 = millis();
@@ -286,6 +315,7 @@ bool xwr6843aopInit() {
   }
   bootBuf[bc] = '\0';
 
+#if USB_PRINT_ENABLED
   Serial.print("CLI boot bytes ("); Serial.print(bc); Serial.print("): ");
   if (bc == 0) {
     Serial.println("(none)");
@@ -298,6 +328,7 @@ bool xwr6843aopInit() {
     Serial.println();
   }
   Serial.println("──────────────────────────────────");
+#endif
 
   return configure();
 }
@@ -315,10 +346,15 @@ void xwr6843aopUpdate(RadarFrame& frame) {
 }
 
 void xwr6843aopDrainCli() {
+#if USB_PRINT_ENABLED
   while (CLI.available()) Serial.print((char)CLI.read());
+#else
+  while (CLI.available()) CLI.read();
+#endif
 }
 
 void xwr6843aopPrintRaw(const RadarFrame& frame) {
+#if USB_PRINT_ENABLED
   Serial.print("RADAR RAW  obj="); Serial.print(frame.numObj);
   Serial.print("  tlvs=");         Serial.print(frame.numTLV);
   Serial.print("  raw=");          Serial.println(frame.numRaw);
@@ -333,4 +369,5 @@ void xwr6843aopPrintRaw(const RadarFrame& frame) {
     Serial.print("  vr="); Serial.print(p.vr, 3);
     Serial.println(" m/s");
   }
+#endif
 }
