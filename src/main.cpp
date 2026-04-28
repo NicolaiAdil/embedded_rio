@@ -10,8 +10,11 @@
 #include <rio/rio_eskf.h>
 #include "bmi08x.h"
 #include "xwr6843aop.h"
+#include "bmp581.h"
 
 #include "config.h"
+
+static constexpr uint8_t BMP581_CS_PIN = 10;
 
 // ──────────────────────────────────────────────────────────────
 // IMU type selection — change this line to swap hardware
@@ -253,6 +256,13 @@ void setup() {
 #endif
   }
 
+  // --- Barometer ---
+  if (!bmp581Init(BMP581_CS_PIN)) {
+#if USB_PRINT_ENABLED
+    Serial.println("BMP581 init failed");
+#endif
+  }
+
 #if USB_PRINT_ENABLED
   Serial.println("RIO ESKF ready");
 #endif
@@ -384,7 +394,7 @@ void loop() {
   #endif
   }
 
-  // --- Rate logging (once per second) ---
+  // --- Rate logging + barometer print (once per second) ---
   const uint32_t now_ms = millis();
   if (now_ms - s_rate_t_ms >= 1000) {
     const float dt_s = (now_ms - s_rate_t_ms) * 1e-3f;
@@ -393,6 +403,19 @@ void loop() {
     Serial.print(s_imu_count   / dt_s, 1);
     Serial.print(" radar_hz=");
     Serial.println(s_radar_count / dt_s, 1);
+
+    float baro_temp, baro_press;
+    if (bmp581Read(baro_temp, baro_press)) {
+      Serial.print("BARO temp=");
+      Serial.print(baro_temp, 2);
+      Serial.print(" C  press=");
+      Serial.print(baro_press, 2);
+      Serial.print(" Pa (");
+      Serial.print(baro_press / 100.0f, 2);
+      Serial.println(" hPa)");
+    } else {
+      Serial.println("BARO no data ready");
+    }
 #endif
     s_imu_count   = 0;
     s_radar_count = 0;
