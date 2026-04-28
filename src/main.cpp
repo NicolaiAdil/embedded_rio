@@ -86,7 +86,7 @@ static void fillCov6(float out[21], const rio::Mat21& P,
   }
 }
 
-static void sendOdometry(const rio::NominalState& x, const rio::Mat21& P, float t_sec) {
+static void sendOdometry(const rio::NominalState& x, const rio::Mat21& P, float t_sec, int8_t quality) {
   // 180° pitch = quaternion (w=0, x=0, y=1, z=0)
   static const rio::Quat q_t(0.0f, 0.0f, 1.0f, 0.0f);  // Eigen (w,x,y,z)
 
@@ -112,6 +112,8 @@ static void sendOdometry(const rio::NominalState& x, const rio::Mat21& P, float 
   odom.vx = v_body.x();
   odom.vy = v_body.y();
   odom.vz = v_body.z();
+
+  odom.quality = quality;
 
   // Angular velocity not available — mark unknown
   odom.rollspeed  = NAN;
@@ -229,6 +231,7 @@ void setup() {
 #endif
     while (1) delay(100);
   }
+  delay(200);
 
   // --- ESKF ---
   g_params = makeParams();
@@ -304,6 +307,9 @@ void loop() {
     rio::CorrectionResult res = eskf.correct(doppler, radarFrame.numRaw, last_imu);
     s_radar_count++;
 
+    const uint32_t total = res.n_accepted + res.n_rejected + res.n_skipped;
+    const int8_t quality = (total > 0) ? static_cast<int8_t>(res.n_accepted * 100u / total) : 0;
+
     if (res.n_rejected > 0) {
       Serial.print("ESKF correct: ");
       Serial.print(res.n_accepted); Serial.print(" accepted, ");
@@ -314,7 +320,7 @@ void loop() {
     const auto& x = eskf.getState();
     const auto& P = eskf.getCovariance();
 #if !USB_PRINT_ENABLED
-    sendOdometry(x, P, t_r);
+    sendOdometry(x, P, t_r, quality);
 #else
     // Position
     Serial.print("p_WI=[");
