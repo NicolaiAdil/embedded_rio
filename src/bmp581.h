@@ -1,22 +1,23 @@
 #pragma once
 // ──────────────────────────────────────────────────────────────
-// BMP581 barometer driver for Teensy 4.1
-// SPI (hardware SPI0), 4-wire.
+// BMP581 barometer driver for Teensy 4.1 — I2C on Wire2.
 //
-// Wiring (from shuttle board 3.0 → Teensy 4.1):
-//   P2·1 CS  → Pin 10  (any digital, passed to bmp581Init)
-//   P2·2 SCK → Pin 13  (SPI0 SCK)
-//   P2·3 SDO → Pin 12  (SPI0 MISO)
-//   P2·4 SDI → Pin 11  (SPI0 MOSI)
-//   P1·1/2   → 3.3 V
-//   P1·3     → GND
+// Wiring (shuttle board 3.0 → Teensy 4.1):
+//   P1·1 VDD   → 3.3 V
+//   P1·2 VDDIO → 3.3 V
+//   P1·3 GND   → GND
+//   P2·1 CSB   → 3.3 V          (forces I2C mode)
+//   P2·2 SCL   → Pin 24         (Wire2 SCL)
+//   P2·3 SDO   → GND            (selects I2C addr 0x46)
+//   P2·4 SDA   → Pin 25         (Wire2 SDA)
+//
+// Pull-ups: 4.7 kΩ from SDA and SCL to 3.3 V (lower if wires are long).
 // ──────────────────────────────────────────────────────────────
 #include <Arduino.h>
 
-/// Call once in setup() after SPI.begin() (or let bmp581Init call it).
-/// cs_pin: the chip-select pin number (default 10).
+/// Call once in setup(). Initialises Wire2 internally.
 /// Returns true on success (chip ID matched).
-bool bmp581Init(uint8_t cs_pin = 10);
+bool bmp581Init();
 
 /// Read latest temperature and pressure.
 /// temp_c   : output temperature in °C

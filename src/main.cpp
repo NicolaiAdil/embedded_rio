@@ -14,8 +14,6 @@
 
 #include "config.h"
 
-static constexpr uint8_t BMP581_CS_PIN = 10;
-
 // ──────────────────────────────────────────────────────────────
 // IMU type selection — change this line to swap hardware
 // ──────────────────────────────────────────────────────────────
@@ -245,19 +243,19 @@ void setup() {
   eskf.reset(x0, P0_diag, 0.0f);
 
   // --- Radar ---
-  if (!xwr6843aopInit()) {
-#if USB_PRINT_ENABLED
-    Serial.println("Radar config failed");
-#endif
-    while (1) delay(100); //TODO: try to recover?
-  } else {
-#if USB_PRINT_ENABLED
-    Serial.println("Radar configured OK!");
-#endif
-  }
+//   if (!xwr6843aopInit()) {
+// #if USB_PRINT_ENABLED
+//     Serial.println("Radar config failed");
+// #endif
+//     while (1) delay(100); //TODO: try to recover?
+//   } else {
+// #if USB_PRINT_ENABLED
+//     Serial.println("Radar configured OK!");
+// #endif
+//   }
 
   // --- Barometer ---
-  if (!bmp581Init(BMP581_CS_PIN)) {
+  if (!bmp581Init()) {
 #if USB_PRINT_ENABLED
     Serial.println("BMP581 init failed");
 #endif
