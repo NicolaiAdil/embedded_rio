@@ -1,18 +1,12 @@
 #include "bmi08x.h"
 #include <Wire.h>
 
-// ──────────────────────────────────────────────────────────────
-// I2C addresses
-// ──────────────────────────────────────────────────────────────
 static constexpr uint8_t ACC_ADDR = 0x19;
 static constexpr uint8_t GYR_ADDR = 0x69;
 
-// ──────────────────────────────────────────────────────────────
-// Register addresses
-// ──────────────────────────────────────────────────────────────
 static constexpr uint8_t REG_ACC_CHIP_ID  = 0x00;
 static constexpr uint8_t REG_ACC_X_LSB    = 0x12;
-static constexpr uint8_t REG_ACC_CONF     = 0x40;  // ODR and bandwidth
+static constexpr uint8_t REG_ACC_CONF     = 0x40;
 static constexpr uint8_t REG_ACC_RANGE    = 0x41;
 static constexpr uint8_t REG_ACC_PWR_CONF = 0x7C;
 static constexpr uint8_t REG_ACC_PWR_CTRL = 0x7D;
@@ -20,20 +14,13 @@ static constexpr uint8_t REG_ACC_PWR_CTRL = 0x7D;
 static constexpr uint8_t REG_GYR_CHIP_ID   = 0x00;
 static constexpr uint8_t REG_GYR_X_LSB     = 0x02;
 static constexpr uint8_t REG_GYR_RANGE     = 0x0F;
-static constexpr uint8_t REG_GYR_BANDWIDTH = 0x10;  // ODR + filter bandwidth
+static constexpr uint8_t REG_GYR_BANDWIDTH = 0x10;
 
-// ──────────────────────────────────────────────────────────────
-// Chip IDs
-// ──────────────────────────────────────────────────────────────
 static constexpr uint8_t CHIP_ID_ACC_BMI085 = 0x1F;
 static constexpr uint8_t CHIP_ID_ACC_BMI088 = 0x1E;
-static constexpr uint8_t CHIP_ID_GYR        = 0x0F;  // same for both
+static constexpr uint8_t CHIP_ID_GYR        = 0x0F;
 
-// ──────────────────────────────────────────────────────────────
-// Scale factors — BMI085: ±8 g  (REG_ACC_RANGE = 0x02)
-// Scale factors — BMI088: ±12 g (REG_ACC_RANGE = 0x02)
-// Gyro ±2000 °/s — identical for both
-// ──────────────────────────────────────────────────────────────
+// Range register 0x02 selects ±8 g on BMI085 and ±12 g on BMI088.
 static constexpr uint8_t ACC_RANGE_REG_BMI085 = 0x02;
 static constexpr float   ACC_SCALE_BMI085     = 8.0f  * 9.80665f / 32768.0f;
 
@@ -43,16 +30,10 @@ static constexpr float   ACC_SCALE_BMI088     = 12.0f * 9.80665f / 32768.0f;
 static constexpr uint8_t GYR_RANGE_REG_VAL = 0x00;
 static constexpr float   GYR_SCALE         = (1.0f / 16.384f) * (M_PI / 180.0f);
 
-// ──────────────────────────────────────────────────────────────
-// Module state
-// ──────────────────────────────────────────────────────────────
 static bool    s_i2c_ok    = true;
 static ImuType s_imu_type  = ImuType::BMI085;
 static float   s_acc_scale = ACC_SCALE_BMI085;
 
-// ──────────────────────────────────────────────────────────────
-// I2C helpers
-// ──────────────────────────────────────────────────────────────
 static bool i2cWriteReg(uint8_t dev, uint8_t reg, uint8_t val) {
   Wire.beginTransmission(dev);
   Wire.write(reg);
@@ -82,9 +63,6 @@ static bool i2cReadBurst(uint8_t dev, uint8_t reg, uint8_t* buf, uint8_t len) {
   return true;
 }
 
-// ──────────────────────────────────────────────────────────────
-// Public API
-// ──────────────────────────────────────────────────────────────
 bool bmi08xInit(ImuType type) {
   s_imu_type = type;
   uint8_t id = 0;
@@ -94,7 +72,6 @@ bool bmi08xInit(ImuType type) {
   s_acc_scale             = is088 ? ACC_SCALE_BMI088     : ACC_SCALE_BMI085;
   const uint8_t exp_acc_id = is088 ? CHIP_ID_ACC_BMI088  : CHIP_ID_ACC_BMI085;
 
-  // --- Accelerometer power-on (same sequence for both parts) ---
   if (!i2cWriteReg(ACC_ADDR, REG_ACC_PWR_CTRL, 0x04)) return false;
   delay(5);
   if (!i2cWriteReg(ACC_ADDR, REG_ACC_PWR_CONF, 0x00)) return false;
@@ -111,14 +88,12 @@ bool bmi08xInit(ImuType type) {
   if (!i2cWriteReg(ACC_ADDR, REG_ACC_RANGE, acc_range)) return false;
   delay(2);
 
-  // 200 Hz ODR, normal bandwidth (acc_bwp=0xA, acc_odr=0x9).
-  // Without this the BMI088 defaults to 100 Hz, causing the same accelerometer
-  // reading to be processed multiple times per poll cycle, which inflates the
-  // velocity process noise and produces velocity oscillations at rest.
+  // 200 Hz ODR / normal bandwidth. Default is 100 Hz, which causes the
+  // same accelerometer reading to be processed multiple times per poll
+  // cycle and produces velocity oscillations at rest.
   if (!i2cWriteReg(ACC_ADDR, REG_ACC_CONF, 0xA9)) return false;
   delay(2);
 
-  // --- Gyroscope (chip ID identical for both parts) ---
   if (!i2cReadReg(GYR_ADDR, REG_GYR_CHIP_ID, id)) return false;
   Serial.print("Gyro  chip ID: 0x"); Serial.println(id, HEX);
   if (id != CHIP_ID_GYR) {
@@ -129,10 +104,7 @@ bool bmi08xInit(ImuType type) {
   if (!i2cWriteReg(GYR_ADDR, REG_GYR_RANGE, GYR_RANGE_REG_VAL)) return false;
   delay(2);
 
-  // 200 Hz ODR, 64 Hz filter bandwidth.
-  // Default is 0x00 (2000 Hz, 532 Hz BW). Options at 200 Hz:
-  //   0x04 = 200 Hz ODR, 23 Hz BW  (very smooth, high latency)
-  //   0x06 = 200 Hz ODR, 64 Hz BW  (good balance for drone dynamics)
+  // 200 Hz ODR / 64 Hz BW (alternative 0x04 = 23 Hz BW for smoother but laggier).
   if (!i2cWriteReg(GYR_ADDR, REG_GYR_BANDWIDTH, 0x06)) return false;
   delay(2);
 

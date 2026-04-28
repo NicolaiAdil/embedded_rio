@@ -20,7 +20,6 @@ bool bmp581Init() {
     return false;
   }
 
-  // 50 Hz output, OSR_T ×1, OSR_P ×8 (matches what we were trying manually).
   bmp5_osr_odr_press_config cfg = {0};
   cfg.odr      = BMP5_ODR_50_HZ;
   cfg.press_en = BMP5_ENABLE;
