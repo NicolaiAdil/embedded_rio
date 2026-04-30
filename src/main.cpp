@@ -207,7 +207,6 @@ static void publishState(float t, int8_t quality) {
   const auto& x = eskf.getState();
   const auto& P = eskf.getCovariance();
 #if USB_PRINT_ENABLED
-  (void)t; (void)quality;
   printState(x, P);
 #else
   sendOdometry(x, P, t, quality);
@@ -217,6 +216,10 @@ static void publishState(float t, int8_t quality) {
 static constexpr uint32_t IMU_HZ        = 200;
 static constexpr uint32_t IMU_PERIOD_US = 1000000UL / IMU_HZ;
 static uint32_t s_imu_last_us           = 0;
+
+static constexpr uint32_t BARO_HZ        = 50;
+static constexpr uint32_t BARO_PERIOD_US = 1000000UL / BARO_HZ;
+static uint32_t s_baro_last_us           = 0;
 
 static void processImu(const rio::Vec3& f_b, const rio::Vec3& w_b) {
   const float t = static_cast<float>(millis()) * 1e-3f;
@@ -289,6 +292,10 @@ static void processRadar(const RadarFrame& frame) {
 }
 
 static void processBaro() {
+  const uint32_t now_us = micros();
+  if (now_us - s_baro_last_us < BARO_PERIOD_US) return;
+  s_baro_last_us = now_us;
+
   float temp_c, press_pa;
   if (!bmp581Read(temp_c, press_pa)) return;
 
@@ -353,18 +360,19 @@ static void setupSensors() {
 #endif
     while (1) delay(100);
   }
-  delay(200);
-
-  // if (!xwr6843aopInit()) {
-  //   Serial.println("Radar config failed");
-  //   while (1) delay(100);
-  // }
 
   if (!bmp581Init()) {
 #if USB_PRINT_ENABLED
     Serial.println("BMP581 init failed");
 #endif
   }
+  delay(200);
+
+  if (!xwr6843aopInit()) {
+    Serial.println("Radar config failed");
+    while (1) delay(100);
+  }
+
 }
 
 static void setupEskf() {
