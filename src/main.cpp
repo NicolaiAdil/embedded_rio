@@ -40,7 +40,7 @@ static rio::Params makeParams() {
   p.q_IR = rio::Quat(0.68301f, -0.18301f, -0.18301f, 0.68301f);  // Eigen (w,x,y,z)
   p.p_IR = rio::Vec3(-0.065f, 0.025013f, 0.020f);
 
-  p.sigma_vr      = 0.058f;
+  p.sigma_vr      = 0.038f;
   p.gating_enable = true;
   p.gate_nsigma   = 5.0f;
   p.vr_sign       = 1.0f;
