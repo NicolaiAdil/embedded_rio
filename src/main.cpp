@@ -257,6 +257,22 @@ static void processImu(const rio::Vec3& f_b, const rio::Vec3& w_b) {
   s_imu_count++;
 }
 
+static constexpr int LED_STATUS  = 2;
+static constexpr int LED_QUALITY = 3;
+
+static int s_led = 0;
+static void setLed(int v) {
+  if (s_led == v) return;
+  digitalWrite(LED_STATUS, v ? HIGH : LOW);
+  s_led = v;
+}
+
+static int8_t s_radar_quality = 0;
+static void setQualityLed(int8_t quality) {
+  s_radar_quality = quality;
+  digitalWrite(LED_QUALITY, quality > 10 ? HIGH : LOW);
+}
+
 static void processRadar(const RadarFrame& frame) {
   if (!frame.valid || frame.numRaw == 0 || !att_initialized) return;
 
@@ -288,6 +304,7 @@ static void processRadar(const RadarFrame& frame) {
   }
 #endif
 
+  setQualityLed(quality);
   publishState(t_r, quality);
 }
 
@@ -341,13 +358,6 @@ static void printRates(uint32_t now_ms) {
   s_rate_t_ms   = now_ms;
 }
 
-static int s_led = 0;
-static void setLed(int v) {
-  if (s_led == v) return;
-  digitalWrite(LED_BUILTIN, v ? HIGH : LOW);
-  s_led = v;
-}
-
 static RadarFrame radarFrame;
 
 static void setupSensors() {
@@ -386,7 +396,8 @@ static void setupEskf() {
 }
 
 void setup() {
-  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(LED_STATUS,  OUTPUT);
+  pinMode(LED_QUALITY, OUTPUT);
 
 #if USB_PRINT_ENABLED
   Serial.begin(115200);
