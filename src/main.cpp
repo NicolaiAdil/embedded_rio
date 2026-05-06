@@ -13,6 +13,7 @@
 #include "bmp581.h"
 
 #include "config.h"
+#include "sd_logger.h"
 
 // static constexpr ImuType IMU_TYPE = ImuType::BMI085;
 static constexpr ImuType IMU_TYPE = ImuType::BMI088;
@@ -50,9 +51,9 @@ static rio::Params makeParams() {
 static constexpr float P0_diag[21] = {
   1e-6f  , 1e-6f  , 1e-6f  , // ego position (m)
   1e-1f  , 1e-1f  , 1e-1f  , // ego velocity (m/s)
-  1e-4f  , 1e-4f  , 1e-4f  , // accelerometer bias (m/s²)
+  1e-2f  , 1e-2f  , 1e-2f  , // accelerometer bias (m/s²)
   1.1e-3f, 1.1e-3f, 1e-8f , // ego attitude (rad): roll/pitch from gravity, yaw unknown
-  1e-5f  , 1e-5f  , 1e-5f  , // gyroscope bias (rad/s)
+  1e-4f  , 1e-4f  , 1e-4f  , // gyroscope bias (rad/s)
   2.0e-5f, 2.0e-5f, 2.0e-5f, // radar position relative to IMU (m)
   1.0e-2f, 1.0e-2f, 1.0e-2f, // radar attitude relative to IMU (rad)
 };
@@ -224,6 +225,10 @@ static uint32_t s_baro_last_us           = 0;
 static void processImu(const rio::Vec3& f_b, const rio::Vec3& w_b) {
   const float t = static_cast<float>(millis()) * 1e-3f;
 
+#if SD_LOG_ENABLED
+  sdLoggerLogImu(t, f_b, w_b);
+#endif
+
   if (!time_initialized) {
     last_t = t;
     time_initialized = true;
@@ -272,6 +277,11 @@ static void processRadar(const RadarFrame& frame) {
   }
 
   rio::CorrectionResult res = eskf.correct(doppler, frame.numRaw, last_imu);
+
+#if SD_LOG_ENABLED
+  sdLoggerLogRadar(t_r, frame);
+#endif
+
   s_radar_count++;
 
   const uint32_t total   = res.n_accepted + res.n_rejected + res.n_skipped;
@@ -280,7 +290,7 @@ static void processRadar(const RadarFrame& frame) {
       : 0;
 
 #if USB_PRINT_ENABLED
-  if (res.n_rejected > 0) {
+  if (res.n_rejected > 0 || res.n_skipped > 0) {
     Serial.print("ESKF correct: ");
     Serial.print(res.n_accepted); Serial.print(" accepted, ");
     Serial.print(res.n_rejected); Serial.print(" rejected, ");
@@ -302,6 +312,14 @@ static void processBaro() {
   s_baro_temp_c   = temp_c;
   s_baro_press_pa = press_pa;
   s_baro_valid    = true;
+
+#if SD_LOG_ENABLED
+  {
+    const float t_s = static_cast<float>(millis()) * 1e-3f;
+    sdLoggerLogBaro(t_s, temp_c, press_pa);
+  }
+#endif
+
   s_baro_count++;
 
   if (!att_initialized) return;
@@ -361,11 +379,11 @@ static void setupSensors() {
     while (1) delay(100);
   }
 
-  if (!bmp581Init()) {
-#if USB_PRINT_ENABLED
-    Serial.println("BMP581 init failed");
-#endif
-  }
+//   if (!bmp581Init()) {
+// #if USB_PRINT_ENABLED
+//     Serial.println("BMP581 init failed");
+// #endif
+//   }
   delay(200);
 
   if (!xwr6843aopInit()) {
@@ -397,6 +415,10 @@ void setup() {
   setupSensors();
   setupEskf();
 
+#if SD_LOG_ENABLED
+  sdLoggerInit();
+#endif
+
 #if USB_PRINT_ENABLED
   Serial.println("RIO ESKF ready");
 #endif
@@ -424,7 +446,18 @@ void loop() {
   xwr6843aopUpdate(radarFrame);
   processRadar(radarFrame);
 
-  processBaro();
+  // processBaro();
 
   printRates(millis());
+
+#if SD_LOG_ENABLED
+  {
+    static uint32_t s_flush_last_ms = 0;
+    const uint32_t  now_ms          = millis();
+    if (now_ms - s_flush_last_ms >= SD_LOG_FLUSH_INTERVAL_S * 1000UL) {
+      s_flush_last_ms = now_ms;
+      sdLoggerFlush();
+    }
+  }
+#endif
 }
