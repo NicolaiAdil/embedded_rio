@@ -151,14 +151,14 @@ static void sendOdometry(const rio::NominalState& x, const rio::Mat21& P,
 #if USB_PRINT_ENABLED
 static void printState(const rio::NominalState& x, const rio::Mat21& P) {
   Serial.print("p_WI=[");
-  Serial.print(x.p_WI.x(), 4); Serial.print(", ");
-  Serial.print(x.p_WI.y(), 4); Serial.print(", ");
-  Serial.print(x.p_WI.z(), 4); Serial.println("]");
+  Serial.print(x.p_WI.x(), 6); Serial.print(", ");
+  Serial.print(x.p_WI.y(), 6); Serial.print(", ");
+  Serial.print(x.p_WI.z(), 6); Serial.println("]");
 
   Serial.print("v_WI=[");
-  Serial.print(x.v_WI.x(), 4); Serial.print(", ");
-  Serial.print(x.v_WI.y(), 4); Serial.print(", ");
-  Serial.print(x.v_WI.z(), 4); Serial.println("]");
+  Serial.print(x.v_WI.x(), 6); Serial.print(", ");
+  Serial.print(x.v_WI.y(), 6); Serial.print(", ");
+  Serial.print(x.v_WI.z(), 6); Serial.println("]");
 
   Serial.print("q_WI=[");
   Serial.print(x.q_WI.w(), 6); Serial.print(", ");
@@ -192,15 +192,15 @@ static void printState(const rio::NominalState& x, const rio::Mat21& P) {
   auto s  = [&](int i){ return sqrtf(fabsf(P(i, i))); };
   auto xy = [&](int i){ return 0.5f * (s(i) + s(i + 1)); };
   Serial.print("cov_xy=[");
-  Serial.print(xy( 0), 4); Serial.print(", "); Serial.print(xy( 3), 4); Serial.print(", ");
-  Serial.print(xy( 6), 4); Serial.print(", "); Serial.print(xy( 9), 4); Serial.print(", ");
-  Serial.print(xy(12), 4); Serial.print(", "); Serial.print(xy(15), 4); Serial.print(", ");
-  Serial.print(xy(18), 4); Serial.println("]");
+  Serial.print(xy( 0), 6); Serial.print(", "); Serial.print(xy( 3), 6); Serial.print(", ");
+  Serial.print(xy( 6), 6); Serial.print(", "); Serial.print(xy( 9), 6); Serial.print(", ");
+  Serial.print(xy(12), 6); Serial.print(", "); Serial.print(xy(15), 6); Serial.print(", ");
+  Serial.print(xy(18), 6); Serial.println("]");
   Serial.print("cov_z= [");
-  Serial.print(s( 2), 4); Serial.print(", "); Serial.print(s( 5), 4); Serial.print(", ");
-  Serial.print(s( 8), 4); Serial.print(", "); Serial.print(s(11), 4); Serial.print(", ");
-  Serial.print(s(14), 4); Serial.print(", "); Serial.print(s(17), 4); Serial.print(", ");
-  Serial.print(s(20), 4); Serial.println("]");
+  Serial.print(s( 2), 6); Serial.print(", "); Serial.print(s( 5), 6); Serial.print(", ");
+  Serial.print(s( 8), 6); Serial.print(", "); Serial.print(s(11), 6); Serial.print(", ");
+  Serial.print(s(14), 6); Serial.print(", "); Serial.print(s(17), 6); Serial.print(", ");
+  Serial.print(s(20), 6); Serial.println("]");
 }
 #endif
 

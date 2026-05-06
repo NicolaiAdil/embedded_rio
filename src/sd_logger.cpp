@@ -95,10 +95,10 @@ void sdLoggerLogRadar(float t_s, const RadarFrame& frame) {
         s_file.print("RAD,");
         s_file.print(t_s, 6);
         s_file.print(','); s_file.print(i);
-        s_file.print(','); s_file.print(frame.raw[i].x, 4);
-        s_file.print(','); s_file.print(frame.raw[i].y, 4);
-        s_file.print(','); s_file.print(frame.raw[i].z, 4);
-        s_file.print(','); s_file.println(frame.raw[i].vr, 4);
+        s_file.print(','); s_file.print(frame.raw[i].x, 6);
+        s_file.print(','); s_file.print(frame.raw[i].y, 6);
+        s_file.print(','); s_file.print(frame.raw[i].z, 6);
+        s_file.print(','); s_file.println(frame.raw[i].vr, 6);
     }
 }
 
@@ -110,8 +110,8 @@ void sdLoggerLogBaro(float t_s, float temp_c, float press_pa) {
 
     s_file.print("BAR,");
     s_file.print(t_s, 6);
-    s_file.print(','); s_file.print(temp_c, 3);
-    s_file.print(','); s_file.println(press_pa, 2);
+    s_file.print(','); s_file.print(temp_c, 6);
+    s_file.print(','); s_file.println(press_pa, 6);
 }
 
 // ── flush ─────────────────────────────────────────────────────────────────────
