@@ -45,6 +45,11 @@ static rio::Params makeParams() {
   p.gating_enable = true;
   p.gate_nsigma   = 5.0f;
   p.vr_sign       = 1.0f;
+
+  p.sigma_baro_dz      = 0.3f;
+  p.baro_gating_enable = true;
+  p.baro_gate_nsigma   = 5.0f;
+  p.baro_z_sign        = 1.0f;  // g_W.z() < 0 → world z is up
   return p;
 }
 
@@ -324,10 +329,27 @@ static void processBaro() {
 
   if (!att_initialized) return;
 
-  // HOOK: barometer aiding correction — wire up once rio-lib API exists.
-  // const float t = static_cast<float>(millis()) * 1e-3f;
-  // eskf.correctBarometer(press_pa, /*sigma=*/..., t, last_imu);
-  // publishState(t, /*quality=*/100);
+  rio::BarometerSample baro;
+  baro.t           = static_cast<float>(millis()) * 1e-3f;
+  baro.pressure_pa = press_pa;
+  baro.temp_c      = temp_c;
+
+  rio::BaroCorrectionResult br = eskf.correctBarometer(baro);
+
+#if USB_PRINT_ENABLED
+  if (br.rejected) {
+    Serial.print("BARO rejected: dz_meas=");
+    Serial.print(br.dz_meas, 3);
+    Serial.print(" dz_pred=");
+    Serial.print(br.dz_pred, 3);
+    Serial.print(" residual=");
+    Serial.println(br.residual, 3);
+  }
+#endif
+
+  if (br.accepted) {
+    publishState(baro.t, /*quality=*/100);
+  }
 }
 
 static void printRates(uint32_t now_ms) {
@@ -383,6 +405,7 @@ static void setupSensors() {
 // #if USB_PRINT_ENABLED
 //     Serial.println("BMP581 init failed");
 // #endif
+//     while (1) delay(100);
 //   }
   delay(200);
 
