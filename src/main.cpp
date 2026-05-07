@@ -41,17 +41,18 @@ static rio::Params makeParams() {
   p.q_IR = rio::Quat(0.68301f, -0.18301f, -0.18301f, 0.68301f);  // Eigen (w,x,y,z)
   p.p_IR = rio::Vec3(-0.065f, 0.025013f, 0.020f);
 
-  p.sigma_vr      = 0.038f;
-  p.gating_enable = true;
-  p.gate_nsigma   = 5.0f;
-  p.vr_sign       = 1.0f;
-
-  p.sigma_baro_dz      = 0.3f;
-  p.baro_gating_enable = true;
-  p.baro_gate_nsigma   = 5.0f;
-  p.baro_z_sign        = 1.0f;  // g_W.z() < 0 → world z is up
   return p;
 }
+
+// Per-modality measurement parameters and persistent measurement instances.
+static const rio::RadarDopplerMeasurement::Params g_radar_p{
+    /*sigma_vr=*/0.038f, /*vr_sign=*/1.0f,
+    /*gate_nsigma=*/5.0f, /*gating=*/true};
+
+static rio::BarometerDiffMeasurement g_baro_meas(
+    rio::BarometerDiffMeasurement::Params{
+        /*sigma_dz=*/0.3f, /*z_sign=*/1.0f,
+        /*gate_nsigma=*/5.0f, /*gating=*/true});
 
 static constexpr float P0_diag[21] = {
   1e-6f  , 1e-6f  , 1e-6f  , // ego position (m)
@@ -270,18 +271,7 @@ static void processImu(const rio::Vec3& f_b, const rio::Vec3& w_b) {
 static void processRadar(const RadarFrame& frame) {
   if (!frame.valid || frame.numRaw == 0 || !att_initialized) return;
 
-  static rio::RadarDoppler doppler[RadarFrame::MAX_POINTS];
   const float t_r = static_cast<float>(millis()) * 1e-3f;
-  for (uint32_t i = 0; i < frame.numRaw; i++) {
-    doppler[i].t     = t_r;
-    doppler[i].u_R   = rio::Vec3(frame.raw[i].x,
-                                 frame.raw[i].y,
-                                 frame.raw[i].z);
-    doppler[i].vr    = frame.raw[i].vr;
-    doppler[i].sigma = g_params.sigma_vr;
-  }
-
-  rio::CorrectionResult res = eskf.correct(doppler, frame.numRaw, last_imu);
 
 #if SD_LOG_ENABLED
   sdLoggerLogRadar(t_r, frame);
@@ -289,17 +279,35 @@ static void processRadar(const RadarFrame& frame) {
 
   s_radar_count++;
 
-  const uint32_t total   = res.n_accepted + res.n_rejected + res.n_skipped;
+  rio::MeasurementContext ctx{&last_imu};
+  uint32_t n_acc = 0, n_rej = 0, n_skp = 0;
+  for (uint32_t i = 0; i < frame.numRaw; i++) {
+    rio::RadarDopplerMeasurement m(
+        g_radar_p,
+        rio::Vec3(frame.raw[i].x, frame.raw[i].y, frame.raw[i].z),
+        frame.raw[i].vr);
+    const rio::ScalarUpdate u = eskf.applyScalar(m, ctx);
+    switch (u.status) {
+      case rio::ScalarUpdate::Accepted: ++n_acc; break;
+      case rio::ScalarUpdate::Rejected: ++n_rej; break;
+      default:                          ++n_skp; break;
+    }
+  }
+  // Match the old batch behavior: if no point was accepted, snap P_hat_
+  // to the predicted prior so getCovariance() reflects the latest predict.
+  if (n_acc == 0) eskf.advancePriorToPosterior();
+
+  const uint32_t total   = n_acc + n_rej + n_skp;
   const int8_t   quality = (total > 0)
-      ? static_cast<int8_t>(res.n_accepted * 100u / total)
+      ? static_cast<int8_t>(n_acc * 100u / total)
       : 0;
 
 #if USB_PRINT_ENABLED
-  if (res.n_rejected > 0 || res.n_skipped > 0) {
+  if (n_rej > 0 || n_skp > 0) {
     Serial.print("ESKF correct: ");
-    Serial.print(res.n_accepted); Serial.print(" accepted, ");
-    Serial.print(res.n_rejected); Serial.print(" rejected, ");
-    Serial.print(res.n_skipped);  Serial.println(" skipped");
+    Serial.print(n_acc); Serial.print(" accepted, ");
+    Serial.print(n_rej); Serial.print(" rejected, ");
+    Serial.print(n_skp); Serial.println(" skipped");
   }
 #endif
 
@@ -334,20 +342,21 @@ static void processBaro() {
   baro.pressure_pa = press_pa;
   baro.temp_c      = temp_c;
 
-  rio::BaroCorrectionResult br = eskf.correctBarometer(baro);
+  g_baro_meas.setSample(baro);
+  const rio::ScalarUpdate u = eskf.applyScalar(g_baro_meas);
 
 #if USB_PRINT_ENABLED
-  if (br.rejected) {
+  if (u.status == rio::ScalarUpdate::Rejected) {
     Serial.print("BARO rejected: dz_meas=");
-    Serial.print(br.dz_meas, 3);
+    Serial.print(g_baro_meas.lastDzMeas(), 3);
     Serial.print(" dz_pred=");
-    Serial.print(br.dz_pred, 3);
+    Serial.print(g_baro_meas.lastDzPred(), 3);
     Serial.print(" residual=");
-    Serial.println(br.residual, 3);
+    Serial.println(u.residual, 3);
   }
 #endif
 
-  if (br.accepted) {
+  if (u.status == rio::ScalarUpdate::Accepted) {
     publishState(baro.t, /*quality=*/100);
   }
 }
