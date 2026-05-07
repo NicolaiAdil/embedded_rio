@@ -401,12 +401,12 @@ static void setupSensors() {
     while (1) delay(100);
   }
 
-//   if (!bmp581Init()) {
-// #if USB_PRINT_ENABLED
-//     Serial.println("BMP581 init failed");
-// #endif
-//     while (1) delay(100);
-//   }
+  if (!bmp581Init()) {
+#if USB_PRINT_ENABLED
+    Serial.println("BMP581 init failed");
+#endif
+    while (1) delay(100);
+  }
   delay(200);
 
   if (!xwr6843aopInit()) {
@@ -469,7 +469,7 @@ void loop() {
   xwr6843aopUpdate(radarFrame);
   processRadar(radarFrame);
 
-  // processBaro();
+  processBaro();
 
   printRates(millis());
 

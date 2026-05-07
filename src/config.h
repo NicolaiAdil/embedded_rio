@@ -6,7 +6,7 @@
 
 // ── SD card logging ──────────────────────────────────────────────────────────
 // Master switch: set to 1 to enable CSV logging of sensor data to SD card.
-#define SD_LOG_ENABLED 1
+#define SD_LOG_ENABLED 0
 
 // Hardware: 1 = Teensy 4.1 built-in SDIO (BUILTIN_SDCARD)
 //           0 = Teensy 4.0 external SPI (specify CS pin below)

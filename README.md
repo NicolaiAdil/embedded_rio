@@ -13,3 +13,17 @@ Build and upload to teensy 4.1:
 Build and upload to teensy 4.0:
 'pio run -e teensy40'
 'pio run -e teensy40 --target upload'
+
+
+Replay an SD-card log offline (desktop):
+```
+cmake -S tools/replay -B build/replay -DCMAKE_BUILD_TYPE=Release
+cmake --build build/replay -j
+./build/replay/rio_replay /path/to/LOG0001.CSV runs/baseline
+python3 tools/replay/scripts/plot_runs.py runs/baseline
+```
+Edit `makeParams()` / `P0_diag` in `tools/replay/src/replay.cpp` to retune,
+rebuild, write to a new output dir, and overlay runs:
+```
+python3 tools/replay/scripts/plot_runs.py runs/baseline runs/variant
+```
