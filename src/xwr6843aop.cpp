@@ -214,12 +214,18 @@ static void parseTLVs(const uint8_t* buf, size_t len, RadarFrame& frame) {
   }
 #endif
 
-  for (uint32_t ti = 0; ti < frame.numTLV && ptr + 8 <= end; ti++) {
+  for (uint32_t ti = 0; ti < frame.numTLV; ti++) {
+    if (ptr + 8 > end) break;                          // header doesn't fit
     uint32_t tlvType = u32le(ptr);
     uint32_t tlvLen  = u32le(ptr + 4);
     const uint8_t* tlvData = ptr + 8;
-    ptr += 8 + tlvLen;
-    if (ptr > end) break;
+    // Validate tlvLen fits in the remaining frame BEFORE advancing ptr.
+    // Without this, a glitched/desynced frame can carry a wild tlvLen and
+    // the DETECTED_POINTS loop below reads up to MAX_POINTS*16 bytes past
+    // tlvData, which lands in invalid memory regions and hard-faults the
+    // chip (Data Access Violation seen in CrashReport).
+    if (tlvLen > (uint32_t)(end - tlvData)) break;
+    ptr = tlvData + tlvLen;
 
 #if USB_PRINT_ENABLED
     if (do_dbg) {

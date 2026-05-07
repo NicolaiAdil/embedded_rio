@@ -8,3 +8,9 @@
 
 bool bmp581Init();
 bool bmp581Read(float& temp_c, float& press_pa);
+
+// Bus / device recovery for Wire2. Toggles SCL to release a stuck SDA
+// (BMP581 holding the line low mid-transaction), re-inits the bus and
+// re-applies the OSR config. Called automatically from bmp581Read() on
+// failure; exposed for manual invocation if needed.
+void bmp581Recover();

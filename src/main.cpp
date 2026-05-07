@@ -320,7 +320,13 @@ static void processBaro() {
   s_baro_last_us = now_us;
 
   float temp_c, press_pa;
-  if (!bmp581Read(temp_c, press_pa)) return;
+  if (!bmp581Read(temp_c, press_pa)) {
+    // Recovery just ran inside bmp581Read; the differential anchor held
+    // by g_baro_meas no longer matches whatever pressure the chip will
+    // report next, so drop it to avoid a wild Δz on the first reading.
+    g_baro_meas.resetAnchor();
+    return;
+  }
 
   s_baro_temp_c   = temp_c;
   s_baro_press_pa = press_pa;
@@ -441,6 +447,15 @@ void setup() {
 #if USB_PRINT_ENABLED
   Serial.begin(115200);
   while (!Serial) delay(10);
+
+  // Teensy 4.x preserves fault info in RAM2 across a hard fault. If the
+  // previous run crashed, dump the fault address / PC / stack so we know
+  // exactly where it died.
+  if (CrashReport) {
+    Serial.println("──── PREVIOUS CRASH ────");
+    Serial.print(CrashReport);
+    Serial.println("────────────────────────");
+  }
 #endif
   Serial2.begin(921600);  // Telem1
 
