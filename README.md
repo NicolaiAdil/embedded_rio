@@ -6,13 +6,16 @@ Bosch barometer: https://www.bosch-sensortec.com/media/boschsensortec/downloads/
 TI Radar: https://www.ti.com/tool/IWR6843AOPEVM
 
 Build and upload to teensy 4.1:
-'pio run -e teensy41'
-'pio run -e teensy41 --target upload'
-
+```
+pio run -e teensy41
+pio run -e teensy41 --target upload
+```
 
 Build and upload to teensy 4.0:
-'pio run -e teensy40'
-'pio run -e teensy40 --target upload'
+```
+pio run -e teensy40
+pio run -e teensy40 --target upload
+```
 
 
 Offline replay. `RUN_DIR` is any folder name; the binary writes
