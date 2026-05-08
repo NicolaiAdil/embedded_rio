@@ -74,6 +74,11 @@ static uint32_t s_radar_count = 0;
 static uint32_t s_baro_count  = 0;
 static uint32_t s_rate_t_ms   = 0;
 
+// Per-second baro update counters (reset in printRates).
+static uint32_t s_baro_acc = 0;
+static uint32_t s_baro_rej = 0;
+static uint32_t s_baro_skp = 0;
+
 // Cached so the 1-Hz logger doesn't trigger another I2C read.
 static float s_baro_temp_c   = NAN;
 static float s_baro_press_pa = NAN;
@@ -362,6 +367,13 @@ static void processBaro() {
   }
 #endif
 
+  switch (u.status) {
+    case rio::ScalarUpdate::Accepted: ++s_baro_acc; break;
+    case rio::ScalarUpdate::Rejected: ++s_baro_rej; break;
+    case rio::ScalarUpdate::Skipped:  ++s_baro_skp; break;
+    default: break;  // NotReady (anchor just initialized) — don't count
+  }
+
   if (u.status == rio::ScalarUpdate::Accepted) {
     publishState(baro.t, /*quality=*/100);
   }
@@ -379,6 +391,12 @@ static void printRates(uint32_t now_ms) {
   Serial.print(" baro_hz=");
   Serial.println(s_baro_count / dt_s, 1);
 
+  // Mirror the "ESKF correct" line for radar — per-second baro counts.
+  Serial.print("BARO STATS: ");
+  Serial.print(s_baro_acc); Serial.print(" accepted, ");
+  Serial.print(s_baro_rej); Serial.print(" rejected, ");
+  Serial.print(s_baro_skp); Serial.println(" skipped");
+
   if (s_baro_valid) {
     Serial.print("BARO temp=");
     Serial.print(s_baro_temp_c, 2);
@@ -393,6 +411,9 @@ static void printRates(uint32_t now_ms) {
   s_imu_count   = 0;
   s_radar_count = 0;
   s_baro_count  = 0;
+  s_baro_acc    = 0;
+  s_baro_rej    = 0;
+  s_baro_skp    = 0;
   s_rate_t_ms   = now_ms;
 }
 
@@ -420,7 +441,7 @@ static void setupSensors() {
 #if USB_PRINT_ENABLED
     Serial.println("BMP581 init failed");
 #endif
-    while (1) delay(100);
+    // while (1) delay(100);
   }
   delay(200);
 

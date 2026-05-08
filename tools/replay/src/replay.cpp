@@ -55,8 +55,8 @@ static rio::Params makeParams() {
 }
 
 static constexpr rio::RadarDopplerMeasurement::Params kRadarParams{
-    /*sigma_vr=*/0.038f, /*vr_sign=*/1.0f,
-    /*gate_nsigma=*/5.0f, /*gating=*/true};
+    /*sigma_vr=*/0.050f, /*vr_sign=*/1.0f,
+    /*gate_nsigma=*/3.0f, /*gating=*/true};
 
 static constexpr rio::BarometerDiffMeasurement::Params kBaroParams{
     /*sigma_dz=*/0.3f, /*z_sign=*/1.0f,
