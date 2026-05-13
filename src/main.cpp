@@ -46,7 +46,7 @@ static rio::Params makeParams() {
 
 // Per-modality measurement parameters and persistent measurement instances.
 static const rio::RadarDopplerMeasurement::Params g_radar_p{
-    /*sigma_vr=*/0.038f, /*vr_sign=*/1.0f,
+    /*sigma_vr=*/0.058f, /*vr_sign=*/1.0f,
     /*gate_nsigma=*/5.0f, /*gating=*/true};
 
 static rio::BarometerDiffMeasurement g_baro_meas(
