@@ -2,7 +2,7 @@
 
 // Set to 0 when flying (no USB connected) to skip all Serial prints.
 // Set to 1 when debugging on the bench with USB attached.
-#define USB_PRINT_ENABLED 0
+#define USB_PRINT_ENABLED 1
 
 // ── SD card logging ──────────────────────────────────────────────────────────
 // Master switch: set to 1 to enable CSV logging of sensor data to SD card.

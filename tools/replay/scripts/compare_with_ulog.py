@@ -167,6 +167,23 @@ def transform_replay_to_ned(pos_W, vel_W, q_W_wxyz):
     return pos_N, vel_N, q_N_wxyz
 
 
+def align_origin_pose(pos, q_wxyz):
+    """Translate first position to (0,0,0) and rotate about z so initial
+    yaw = 0. Each trace (EKF2, replay, live VVO) starts at a different
+    heading, so position-only origin alignment leaves the XY traces
+    rotated relative to each other and unable to be overlaid. This applies
+    R_z(-yaw0) to positions and pre-multiplies quaternions, preserving
+    roll, pitch, altitude, |v|, and body-frame velocity."""
+    q0_xyzw = q_wxyz[0, [1, 2, 3, 0]]
+    yaw0    = Rotation.from_quat(q0_xyzw).as_euler("xyz")[2]
+    R_align = Rotation.from_euler("z", -yaw0)
+    pos_a   = R_align.apply(pos - pos[0])
+    q_xyzw  = q_wxyz[:, [1, 2, 3, 0]]
+    q_a_xyzw = (R_align * Rotation.from_quat(q_xyzw)).as_quat()
+    q_a_wxyz = q_a_xyzw[:, [3, 0, 1, 2]]
+    return pos_a, q_a_wxyz
+
+
 def compute_time_offset(df_vvo):
     """Diagnostic only: median(timestamp − timestamp_sample) (µs).
     Unreliable when the sender doesn't echo MAVLink TIMESYNC: PX4 then
@@ -228,6 +245,20 @@ def main():
     print(f"estimator_local_position : {len(ts_ekf)} msgs, "
           f"{(ts_ekf[-1]-ts_ekf[0])/1e6:.2f}s")
 
+    # Drop EKF2 samples before the first VVO message: in that window EKF2 is
+    # still solving for yaw (and z bias) and the estimate jumps around, which
+    # contaminates origin-alignment and APE.
+    ekf_keep = ts_ekf >= ts_vvo[0]
+    n_drop = int(np.sum(~ekf_keep))
+    if n_drop:
+        dropped_s = (ts_vvo[0] - ts_ekf[0]) / 1e6
+        print(f"  trimming {n_drop} EKF2 samples before first VVO "
+              f"({dropped_s:.2f}s of pre-VVO yaw-init data)")
+        ts_ekf  = ts_ekf[ekf_keep]
+        pos_ekf = pos_ekf[ekf_keep]
+        q_ekf   = q_ekf[ekf_keep]
+        vel_ekf = vel_ekf[ekf_keep]
+
     # ── time offset Teensy → PX4 ───────────────────────────────────────────
     # Primary: anchor first replay 'RAD' publish to first live VVO entry.
     offset_us = compute_time_offset_via_first_publish(args.replay_dir, ts_vvo)
@@ -283,17 +314,19 @@ def main():
     t_ekf_rel    = ts_ekf       / 1e6 - t0_s
     t_replay_rel = ts_replay_us / 1e6 - t0_s
 
-    # Per-trace origin-align positions (each trace starts at 0,0,0).
-    pos_ekf_rel = pos_ekf - pos_ekf[0]
-    pos_N_rel   = pos_N   - pos_N[0]
+    # Per-trace pose origin-align: translate to (0,0,0) AND rotate about
+    # z so initial yaw = 0. Position-only alignment leaves XY traces
+    # rotated relative to each other when initial headings differ.
+    pos_ekf_rel, q_ekf_rel = align_origin_pose(pos_ekf, q_ekf)
+    pos_N_rel,   q_N_rel   = align_origin_pose(pos_N,   q_N)
 
     def _euler_deg(q_wxyz):
         q_xyzw = q_wxyz[:, [1, 2, 3, 0]]
         return np.rad2deg(np.unwrap(
             Rotation.from_quat(q_xyzw).as_euler("xyz"), axis=0))
 
-    eul_ekf_full    = _euler_deg(q_ekf)
-    eul_replay_full = _euler_deg(q_N)
+    eul_ekf_full    = _euler_deg(q_ekf_rel)
+    eul_replay_full = _euler_deg(q_N_rel)
 
     # Post-association arrays — used only for paired-error metrics
     # (position error, APE, RPE).
@@ -307,8 +340,8 @@ def main():
     eul_vvo_full = None
     if args.include_live:
         t_vvo_rel    = ts_vvo / 1e6 - t0_s
-        pos_vvo_rel  = pos_vvo - pos_vvo[0]
-        eul_vvo_full = _euler_deg(q_vvo)
+        pos_vvo_rel, q_vvo_rel = align_origin_pose(pos_vvo, q_vvo)
+        eul_vvo_full = _euler_deg(q_vvo_rel)
 
     # ── plots ──────────────────────────────────────────────────────────────
     pos_labels = ["x [m]", "y [m]", "z [m]"]
@@ -500,14 +533,19 @@ def main():
     ax.set_title("Replay covariance evolution")
     ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=8)
 
-    # [1,1] radar normalized innovation histogram (accepted only)
+    # [1,1] radar normalized innovation histogram.
+    # Includes accepted + rejected (skipped points have NaN residual/S
+    # and are dropped by np.isfinite). Filtering to accepted-only would
+    # tautologically put 100% inside the gate's σ-threshold.
     ax = axes[1, 1]
-    acc = rinn_df[rinn_df["status"] == 0]
-    z = acc["residual"] / np.sqrt(acc["S"].clip(lower=1e-12))
-    z = np.asarray(z[np.isfinite(z)], dtype=np.float64)
+    z_all = rinn_df["residual"] / np.sqrt(rinn_df["S"].clip(lower=1e-12))
+    z = np.asarray(z_all[np.isfinite(z_all)], dtype=np.float64)
+    n_acc = int((rinn_df["status"] == 0).sum())
+    n_rej = int((rinn_df["status"] == 1).sum())
     bins = np.linspace(-5, 5, 80)
-    ax.hist(z, bins=bins, density=True, alpha=0.55, color="steelblue",
-            label=f"n={len(z)}  std={z.std():.3f}")
+    ax.hist(np.clip(z, -5, 5), bins=bins, density=True, alpha=0.55,
+            color="steelblue",
+            label=f"n={len(z)} (acc {n_acc}, rej {n_rej})  std={z.std():.3f}")
     xs = np.linspace(-5, 5, 200)
     ax.plot(xs, np.exp(-xs**2 / 2) / np.sqrt(2 * np.pi),
             color="k", lw=1, ls="--", label="N(0,1)")
@@ -532,7 +570,7 @@ def main():
 
     ax.set_yscale("log")
     ax.set_xlabel("residual / √S"); ax.set_ylabel("density (log)")
-    ax.set_title("Radar normalized innovation (accepted)")
+    ax.set_title("Radar normalized innovation (accepted + rejected)")
     ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=8, loc="upper right")
 
     # [1,2] baro innovation timeseries (residual + ±√S band)

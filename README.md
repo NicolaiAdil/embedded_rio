@@ -1,7 +1,7 @@
 
 Bosch IMU: https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bmi085-ds001.pdf
 
-Bosch barometer: https://www.bosch-sensortec.com/media/boschsensortec/downloads/shuttle_board_flyer/application_board_3_1/bst-bmp581-sf000.pdf
+Bosch barometer: https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bmp388-ds001.pdf
 
 TI Radar: https://www.ti.com/tool/IWR6843AOPEVM
 

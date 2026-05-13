@@ -10,7 +10,7 @@
 #include <rio/rio_eskf.h>
 #include "bmi08x.h"
 #include "xwr6843aop.h"
-#include "bmp581.h"
+#include "bmp388.h"
 
 #include "config.h"
 #include "sd_logger.h"
@@ -38,8 +38,8 @@ static rio::Params makeParams() {
   p.min_dt = 1e-6f;
   p.max_dt = 0.1f;
 
-  p.q_IR = rio::Quat(0.68301f, -0.18301f, -0.18301f, 0.68301f);  // Eigen (w,x,y,z)
-  p.p_IR = rio::Vec3(-0.065f, 0.025013f, 0.020f);
+  p.q_IR = rio::Quat(0.5f, -0.5f, 0.5f, -0.5f);  // Eigen (w,x,y,z)
+  p.p_IR = rio::Vec3(0.0f, 0.0f, 0.0f);
 
   return p;
 }
@@ -63,6 +63,16 @@ static constexpr float P0_diag[21] = {
   2.0e-5f, 2.0e-5f, 2.0e-5f, // radar position relative to IMU (m)
   1.0e-2f, 1.0e-2f, 1.0e-2f, // radar attitude relative to IMU (rad)
 };
+
+// Pin 2: peripherals OK (IMU + baro reading without errors).
+// Pin 3: filter stable (attitude initialised from gravity).
+static constexpr uint8_t LED_PERIPH_PIN = 2;
+static constexpr uint8_t LED_FILTER_PIN = 3;
+
+static bool s_imu_ok  = false;
+static bool s_baro_ok = false;
+static int  s_led_periph = -1;
+static int  s_led_filter = -1;
 
 static bool           att_initialized  = false;
 static bool           time_initialized = false;
@@ -298,8 +308,6 @@ static void processRadar(const RadarFrame& frame) {
       default:                          ++n_skp; break;
     }
   }
-  // Match the old batch behavior: if no point was accepted, snap P_hat_
-  // to the predicted prior so getCovariance() reflects the latest predict.
   if (n_acc == 0) eskf.advancePriorToPosterior();
 
   const uint32_t total   = n_acc + n_rej + n_skp;
@@ -325,13 +333,15 @@ static void processBaro() {
   s_baro_last_us = now_us;
 
   float temp_c, press_pa;
-  if (!bmp581Read(temp_c, press_pa)) {
-    // Recovery just ran inside bmp581Read; the differential anchor held
+  if (!bmp388Read(temp_c, press_pa)) {
+    s_baro_ok = false;
+    // Recovery just ran inside bmp388Read; the differential anchor held
     // by g_baro_meas no longer matches whatever pressure the chip will
     // report next, so drop it to avoid a wild Δz on the first reading.
     g_baro_meas.resetAnchor();
     return;
   }
+  s_baro_ok = true;
 
   s_baro_temp_c   = temp_c;
   s_baro_press_pa = press_pa;
@@ -417,11 +427,17 @@ static void printRates(uint32_t now_ms) {
   s_rate_t_ms   = now_ms;
 }
 
-static int s_led = 0;
-static void setLed(int v) {
-  if (s_led == v) return;
-  digitalWrite(LED_BUILTIN, v ? HIGH : LOW);
-  s_led = v;
+static void updateLeds() {
+  const int p = (s_imu_ok && s_baro_ok) ? 1 : 0;
+  const int f = att_initialized ? 1 : 0;
+  if (p != s_led_periph) {
+    digitalWrite(LED_PERIPH_PIN, p ? HIGH : LOW);
+    s_led_periph = p;
+  }
+  if (f != s_led_filter) {
+    digitalWrite(LED_FILTER_PIN, f ? HIGH : LOW);
+    s_led_filter = f;
+  }
 }
 
 static RadarFrame radarFrame;
@@ -437,9 +453,9 @@ static void setupSensors() {
     while (1) delay(100);
   }
 
-  if (!bmp581Init()) {
+  if (!bmp388Init()) {
 #if USB_PRINT_ENABLED
-    Serial.println("BMP581 init failed");
+    Serial.println("BMP388 init failed");
 #endif
     // while (1) delay(100);
   }
@@ -463,7 +479,10 @@ static void setupEskf() {
 }
 
 void setup() {
-  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(LED_PERIPH_PIN, OUTPUT);
+  pinMode(LED_FILTER_PIN, OUTPUT);
+  digitalWrite(LED_PERIPH_PIN, LOW);
+  digitalWrite(LED_FILTER_PIN, LOW);
 
 #if USB_PRINT_ENABLED
   Serial.begin(115200);
@@ -490,7 +509,6 @@ void setup() {
 #if USB_PRINT_ENABLED
   Serial.println("RIO ESKF ready");
 #endif
-  setLed(1);
   s_rate_t_ms = millis();
 }
 
@@ -498,10 +516,11 @@ void loop() {
   rio::Vec3 acc, gyr;
   if (!bmi08xRead(acc, gyr)) {
     bmi08xRecover();
-    setLed(0);
+    s_imu_ok = false;
+    updateLeds();
     return;
   }
-  setLed(1);
+  s_imu_ok = true;
   if (!acc.allFinite() || !gyr.allFinite()) return;
 
   const uint32_t now_us = micros();
@@ -516,6 +535,7 @@ void loop() {
 
   processBaro();
 
+  updateLeds();
   printRates(millis());
 
 #if SD_LOG_ENABLED
