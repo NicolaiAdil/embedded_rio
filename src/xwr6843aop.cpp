@@ -262,14 +262,17 @@ static void parseTLVs(const uint8_t* buf, size_t len, RadarFrame& frame) {
 #endif
       for (uint32_t i = 0; i < nPts && frame.numRaw < RadarFrame::MAX_POINTS; i++) {
         const uint8_t* p = tlvData + i * 16;
-        const float raw_x = f32le(p + 0);
-        const float raw_y = f32le(p + 4);
-        const float raw_z = f32le(p + 8);
+        const float raw_x  = f32le(p + 0);
+        const float raw_y  = f32le(p + 4);
+        const float raw_z  = f32le(p + 8);
+        const float raw_vr = f32le(p + 12);
+        if (!isfinite(raw_x) || !isfinite(raw_y) ||
+            !isfinite(raw_z) || !isfinite(raw_vr)) continue;
         RadarPoint& rp = frame.raw[frame.numRaw++];
         rp.x  = raw_x;
         rp.y  = raw_y;
         rp.z  = raw_z;
-        rp.vr = f32le(p + 12);
+        rp.vr = raw_vr;
       }
     }
   }
