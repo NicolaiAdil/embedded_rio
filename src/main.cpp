@@ -38,15 +38,15 @@ static rio::Params makeParams() {
   p.min_dt = 1e-6f;
   p.max_dt = 0.1f;
 
-  p.q_IR = rio::Quat(0.5f, -0.5f, 0.5f, -0.5f);  // Eigen (w,x,y,z)
-  p.p_IR = rio::Vec3(0.0f, 0.0f, 0.0f);
+  p.q_IR = rio::Quat(0.5f, -0.5f, -0.5f, 0.5f);  // Eigen (w,x,y,z)
+  p.p_IR = rio::Vec3(0.01f, 0.03f, -0.01f);
 
   return p;
 }
 
 // Per-modality measurement parameters and persistent measurement instances.
-static const rio::RadarDopplerMeasurement::Params g_radar_p{
-    /*sigma_vr=*/0.058f, /*vr_sign=*/1.0f,
+static const rio::RadarDopplerMeasurement::Pa rams g_radar_p{
+    /*sigma_vr=*/0.068f, /*vr_sign=*/1.0f,
     /*gate_nsigma=*/5.0f, /*gating=*/true};
 
 static rio::BarometerDiffMeasurement g_baro_meas(
@@ -61,7 +61,7 @@ static constexpr float P0_diag[21] = {
   1.1e-3f, 1.1e-3f, 1e-8f , // ego attitude (rad): roll/pitch from gravity, yaw unknown
   1e-4f  , 1e-4f  , 1e-4f  , // gyroscope bias (rad/s)
   2.0e-5f, 2.0e-5f, 2.0e-5f, // radar position relative to IMU (m)
-  1.0e-2f, 1.0e-2f, 1.0e-2f, // radar attitude relative to IMU (rad)
+  1.0e-4f, 1.0e-4f, 1.0e-4f, // radar attitude relative to IMU (rad)
 };
 
 // Pin 2: peripherals OK (IMU + baro reading without errors).
@@ -278,6 +278,21 @@ static void processImu(const rio::Vec3& f_b, const rio::Vec3& w_b) {
   if (dt >= g_params.min_dt && dt <= g_params.max_dt) {
     eskf.predict(s, dt);
     eskf.insPropagation(s, dt);
+#if !RADAR_AIDING_ENABLED && !BARO_AIDING_ENABLED
+    // No corrections will run — mirror the prior into the posterior so
+    // getCovariance() reflects growing IMU-only uncertainty, and print
+    // the state to Serial at ~50 Hz for the serial plotter. No MAVLink
+    // output in this mode.
+    eskf.advancePriorToPosterior();
+  #if USB_PRINT_ENABLED
+    static uint32_t s_pub_last_us = 0;
+    const uint32_t  now_pub_us    = micros();
+    if (now_pub_us - s_pub_last_us >= 20000UL) {
+      s_pub_last_us = now_pub_us;
+      printState(eskf.getState(), eskf.getCovariance());
+    }
+  #endif
+#endif
   }
 
   s_imu_count++;
@@ -294,6 +309,7 @@ static void processRadar(const RadarFrame& frame) {
 
   s_radar_count++;
 
+#if RADAR_AIDING_ENABLED
   rio::MeasurementContext ctx{&last_imu};
   uint32_t n_acc = 0, n_rej = 0, n_skp = 0;
   for (uint32_t i = 0; i < frame.numRaw; i++) {
@@ -325,6 +341,9 @@ static void processRadar(const RadarFrame& frame) {
 #endif
 
   publishState(t_r, quality);
+#else
+  (void)t_r;
+#endif
 }
 
 static void processBaro() {
@@ -358,6 +377,7 @@ static void processBaro() {
 
   if (!att_initialized) return;
 
+#if BARO_AIDING_ENABLED
   rio::BarometerSample baro;
   baro.t           = static_cast<float>(millis()) * 1e-3f;
   baro.pressure_pa = press_pa;
@@ -387,6 +407,7 @@ static void processBaro() {
   if (u.status == rio::ScalarUpdate::Accepted) {
     publishState(baro.t, /*quality=*/100);
   }
+#endif
 }
 
 static void printRates(uint32_t now_ms) {

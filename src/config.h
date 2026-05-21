@@ -4,9 +4,13 @@
 // Set to 1 when debugging on the bench with USB attached.
 #define USB_PRINT_ENABLED 1
 
+// Aiding switches. Set to 0 to read the sensor but skip its ESKF update —
+#define RADAR_AIDING_ENABLED 1
+#define BARO_AIDING_ENABLED  0
+
 // ── SD card logging ──────────────────────────────────────────────────────────
 // Master switch: set to 1 to enable CSV logging of sensor data to SD card.
-#define SD_LOG_ENABLED 1
+#define SD_LOG_ENABLED 0
 
 // Hardware: 1 = Teensy 4.1 built-in SDIO (BUILTIN_SDCARD)
 //           0 = Teensy 4.0 external SPI (specify CS pin below)
