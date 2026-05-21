@@ -6,7 +6,7 @@
 
 // Aiding switches. Set to 0 to read the sensor but skip its ESKF update —
 #define RADAR_AIDING_ENABLED 1
-#define BARO_AIDING_ENABLED  0
+#define BARO_AIDING_ENABLED  1
 
 // ── SD card logging ──────────────────────────────────────────────────────────
 // Master switch: set to 1 to enable CSV logging of sensor data to SD card.

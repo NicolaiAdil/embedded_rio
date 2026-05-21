@@ -45,7 +45,7 @@ static rio::Params makeParams() {
 }
 
 // Per-modality measurement parameters and persistent measurement instances.
-static const rio::RadarDopplerMeasurement::Pa rams g_radar_p{
+static const rio::RadarDopplerMeasurement::Params g_radar_p{
     /*sigma_vr=*/0.068f, /*vr_sign=*/1.0f,
     /*gate_nsigma=*/5.0f, /*gating=*/true};
 
@@ -115,7 +115,7 @@ static void fillCov6(float out[21], const rio::Mat21& P,
 static void sendOdometry(const rio::NominalState& x, const rio::Mat21& P,
                          float t_sec, int8_t quality) {
   // 180° pitch rotation: Eigen (w,x,y,z) = (0, 0, 1, 0).
-  static const rio::Quat q_t(0.0f, 0.0f, 1.0f, 0.0f);
+  static const rio::Quat q_t(0.0f, 0.7071067811865475f, 0.7071067811865475f, 0.0f);
 
   const rio::Vec3 p_out  = q_t * x.p_WI;
   const rio::Vec3 v_body = q_t * (x.q_WI.inverse() * x.v_WI);
