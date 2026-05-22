@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """Compare offline replay output against PX4 EKF2 ground truth from a .ulg.
 
-Run from the venv that has evo + pyulog installed, e.g.:
-    ~/ntnu/master/ulogs/.venv/bin/python3 \
-        tools/replay/scripts/compare_with_ulog.py \
-        runs/baseline /path/to/flight.ulg --save_results runs/baseline/cmp \
-        [--include_live] [--max_time_diff 0.2]
+Usage:
+    .venv/bin/python3 tools/replay/scripts/compare_with_ulog.py \
+        RUN_DIR FLIGHT.ulg [-o OUT_DIR] [--no-vvo] [-t SECONDS]
+
+Examples:
+    # default — overlays live VVO, writes plots to <RUN_DIR>/cmp/
+    .venv/bin/python3 tools/replay/scripts/compare_with_ulog.py \
+        runs/log24_sigma068 data/field/2105/ulog/log_24_*.ulg
+
+    # suppress live VVO trace, custom output dir
+    .venv/bin/python3 tools/replay/scripts/compare_with_ulog.py \
+        runs/baseline flight.ulg --no-vvo -o /tmp/cmp
 
 Inputs:
-    <replay_dir>/state.csv  — produced by tools/replay/rio_replay
-                              (Teensy world frame, t in Teensy seconds)
-    <ulg_file>              — PX4 .ulg with vehicle_visual_odometry,
-                              estimator_local_position, estimator_attitude
+    RUN_DIR                 — Replay output directory containing state.csv
+                              (produced by tools/replay/rio_replay; Teensy
+                              world frame, t in Teensy seconds).
+    FLIGHT.ulg              — PX4 .ulg with vehicle_visual_odometry,
+                              estimator_local_position, estimator_attitude.
 
 Method:
     1. Read all topics from .ulg.
@@ -145,14 +153,19 @@ def load_replay_state(replay_dir: Path):
     return df["t"].to_numpy(), pos_W, vel_W, q_W
 
 
-# Frame transform applied in firmware src/main.cpp:108-112 to send ODOMETRY
-# in PX4 NED. Replay's state.csv is in raw Teensy world frame, so we apply
-# the same rotation here.
+# Frame transform applied in firmware sendOdometry() (src/main.cpp) to send
+# ODOMETRY in PX4 NED. Replay's state.csv is in raw Teensy world frame, so
+# we apply the same rotation here.
 #
-#   q_t = Quat(w=0, x=0, y=1, z=0)  (180° about y, maps (x,y,z) → (-x, y, -z))
+# Firmware uses Eigen's Quat(w,x,y,z) = (0, √2/2, √2/2, 0): a 180° rotation
+# about the axis (1,1,0)/√2 — the standard ENU↔NED swap, mapping
+# (x, y, z) → (y, x, −z). (The inline comment in src/main.cpp saying
+# "(0,0,1,0)" is stale; the constant itself is the source of truth.)
+#
 #   p_NED = q_t · p_W
 #   q_NED = q_t · q_W · q_t.inv()
-_Q_T_XYZW = np.array([0.0, 1.0, 0.0, 0.0])  # scipy uses (x, y, z, w)
+_INV_SQRT2 = 1.0 / np.sqrt(2.0)
+_Q_T_XYZW = np.array([_INV_SQRT2, _INV_SQRT2, 0.0, 0.0])  # scipy uses (x, y, z, w)
 _R_T = Rotation.from_quat(_Q_T_XYZW)
 
 
@@ -218,23 +231,29 @@ def compute_time_offset_via_first_publish(replay_dir, ts_vvo):
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawTextHelpFormatter)
-    ap.add_argument("replay_dir", type=Path, help="Replay output directory (state.csv inside)")
-    ap.add_argument("ulg",        type=Path, help="PX4 .ulg log file")
-    ap.add_argument("--save_results", type=Path, default=None,
-                    help="Output dir for SVGs (default: <replay_dir>/cmp)")
-    ap.add_argument("--include_live", action="store_true",
-                    help="Also overlay the live VVO trace as a 3rd line")
-    ap.add_argument("--max_time_diff", type=float, default=0.2,
-                    help="evo association tolerance [s]")
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawTextHelpFormatter)
+    ap.add_argument("replay_dir", type=Path,
+                    help="Replay output directory (must contain state.csv)")
+    ap.add_argument("ulg", type=Path,
+                    help="PX4 .ulg log file")
+    ap.add_argument("-o", "--out", "--save_results", type=Path, default=None,
+                    dest="out",
+                    help="Output dir for plots (default: <replay_dir>/cmp)")
+    ap.add_argument("--no-vvo", "--no-live", dest="plot_vvo",
+                    action="store_false",
+                    help="Suppress the live VVO overlay (on by default).")
+    ap.add_argument("-t", "--tol", "--max_time_diff", type=float, default=0.2,
+                    dest="tol",
+                    help="evo association tolerance in seconds (default 0.2)")
     args = ap.parse_args()
 
     if not args.replay_dir.is_dir():
         raise SystemExit(f"not a directory: {args.replay_dir}")
     if not args.ulg.is_file():
         raise SystemExit(f"missing .ulg: {args.ulg}")
-    save_dir = args.save_results or (args.replay_dir / "cmp")
+    save_dir = args.out or (args.replay_dir / "cmp")
 
     # ── load .ulg ──────────────────────────────────────────────────────────
     ulog = ULog(str(args.ulg))
@@ -294,11 +313,11 @@ def main():
     n_replay_before = traj_est.num_poses
     traj_ref_a, traj_est_a = sync.associate_trajectories(
         traj_ref, traj_est,
-        max_diff=args.max_time_diff,
+        max_diff=args.tol,
         first_name="EKF2 (GT)", snd_name="replay")
     matched_pct = 100.0 * traj_est_a.num_poses / max(n_replay_before, 1)
     print(f"\nassociated {traj_est_a.num_poses} / {n_replay_before} replay samples "
-          f"to EKF2 within {args.max_time_diff*1000:.0f} ms ({matched_pct:.1f}%)")
+          f"to EKF2 within {args.tol*1000:.0f} ms ({matched_pct:.1f}%)")
     if matched_pct < 50:
         print("  fewer than 50% matched — time sync is likely wrong.")
 
@@ -338,7 +357,7 @@ def main():
     t_vvo_rel = None
     pos_vvo_rel = None
     eul_vvo_full = None
-    if args.include_live:
+    if args.plot_vvo:
         t_vvo_rel    = ts_vvo / 1e6 - t0_s
         pos_vvo_rel, q_vvo_rel = align_origin_pose(pos_vvo, q_vvo)
         eul_vvo_full = _euler_deg(q_vvo_rel)
@@ -347,59 +366,16 @@ def main():
     pos_labels = ["x [m]", "y [m]", "z [m]"]
     rpy_labels = ["roll [deg]", "pitch [deg]", "yaw [deg]"]
 
-    # Pose vs time — full traces, starting at their actual time offsets.
-    fig, axs = plt.subplots(3, 2, sharex="col", figsize=(12, 8))
-    for i in range(3):
-        axs[i, 0].plot(t_ekf_rel,    pos_ekf_rel[:, i], label="EKF2 (GT)")
-        axs[i, 0].plot(t_replay_rel, pos_N_rel[:, i],   label="replay", alpha=0.85)
-        if t_vvo_rel is not None:
-            axs[i, 0].plot(t_vvo_rel, pos_vvo_rel[:, i], ":",
-                           color="darkorange", alpha=0.7, label="live VVO")
-        axs[i, 0].set_ylabel(pos_labels[i]); axs[i, 0].grid(True, alpha=0.3)
-
-        axs[i, 1].plot(t_ekf_rel,    eul_ekf_full[:, i],    label="EKF2 (GT)")
-        axs[i, 1].plot(t_replay_rel, eul_replay_full[:, i], label="replay", alpha=0.85)
-        if t_vvo_rel is not None:
-            axs[i, 1].plot(t_vvo_rel, eul_vvo_full[:, i], ":",
-                           color="darkorange", alpha=0.7, label="live VVO")
-        axs[i, 1].set_ylabel(rpy_labels[i]); axs[i, 1].grid(True, alpha=0.3)
-
-    axs[0, 0].set_title("Position vs time (per-trace origin-aligned)")
-    axs[0, 1].set_title("Attitude vs time")
-    axs[0, 0].legend(fontsize=8); axs[0, 1].legend(fontsize=8)
-    axs[-1, 0].set_xlabel("t [s] (since EKF2 start)")
-    axs[-1, 1].set_xlabel("t [s] (since EKF2 start)")
-    plt.tight_layout(); handle_fig(fig, "compare_pose", save_dir)
-
-    # XY trajectory overlay — per-trace origin-aligned, no time axis.
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.plot(pos_ekf_rel[:, 0], pos_ekf_rel[:, 1], "--", color="gray",
-            lw=0.8, label="EKF2 (GT)")
-    ax.plot(pos_N_rel[:, 0],   pos_N_rel[:, 1],          color="steelblue",
-            lw=0.8, label="replay")
-    if pos_vvo_rel is not None:
-        ax.plot(pos_vvo_rel[:, 0], pos_vvo_rel[:, 1], ":",
-                color="darkorange", lw=0.8, alpha=0.7, label="live VVO")
-    ax.set_xlabel("x [m]"); ax.set_ylabel("y [m]")
-    ax.set_title("Trajectory XY (per-trace origin-aligned)"); ax.set_aspect("equal")
-    ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
-    plt.tight_layout(); handle_fig(fig, "compare_trajectory_xy", save_dir)
-
-    # Body-frame velocity vs time — full traces, common t-axis.
+    # Body-frame velocities — reused by overlay velocity plot below.
+    # EKF2's estimator_local_position.{vx,vy,vz} and replay's vel_N are both
+    # in NED world frame, so we rotate them into body FRD via R(q).T.
+    # vehicle_visual_odometry.velocity is ALREADY in body FRD frame (the
+    # firmware sets child_frame_id = MAV_FRAME_BODY_FRD and publishes
+    # v_body = q_t · (q_WI.inv · v_WI); see src/main.cpp sendOdometry).
+    # Re-rotating it would double-transform and produce garbage.
     vel_ekf_body    = vel_to_body_frame(vel_ekf, q_ekf)
     vel_replay_body = vel_to_body_frame(vel_N,   q_N)
-    fig, axs = plt.subplots(3, 1, sharex=True, figsize=(12, 7))
-    for i, lbl in enumerate(["vx_body [m/s]", "vy_body [m/s]", "vz_body [m/s]"]):
-        axs[i].plot(t_ekf_rel,    vel_ekf_body[:, i],    label="EKF2 (GT)")
-        axs[i].plot(t_replay_rel, vel_replay_body[:, i], label="replay", alpha=0.85)
-        if t_vvo_rel is not None:
-            vel_vvo_body = vel_to_body_frame(vel_vvo, q_vvo)
-            axs[i].plot(t_vvo_rel, vel_vvo_body[:, i], ":",
-                        color="darkorange", alpha=0.7, label="live VVO")
-        axs[i].set_ylabel(lbl); axs[i].grid(True, alpha=0.3); axs[i].legend(fontsize=8)
-    axs[0].set_title("Velocity vs time (body frame)")
-    axs[-1].set_xlabel("t [s] (since EKF2 start)")
-    plt.tight_layout(); handle_fig(fig, "compare_velocity", save_dir)
+    vel_vvo_body    = vel_vvo if t_vvo_rel is not None else None
 
     # Position error — needs paired data (post-association).
     err      = p_est - p_ref
@@ -443,164 +419,253 @@ def main():
     ax.legend()
     handle_fig(fig, "compare_ape_trajectory", save_dir)
 
-    # RPE
+    # RPE — skipped if the GT trajectory is too short to yield any δ-pairs.
+    from evo.core.filters import FilterException
     traj_length = float(np.sum(np.linalg.norm(np.diff(p_ref, axis=0), axis=1)))
     rpe_delta   = float(np.clip(traj_length * 0.1, 0.05, 10.0))
     print(f"\nGT length: {traj_length:.3f} m  →  RPE δ = {rpe_delta:.3f} m")
     rpe = metrics.RPE(pose_relation=metrics.PoseRelation.translation_part,
                       delta=rpe_delta, delta_unit=Unit.meters, all_pairs=True)
-    rpe.process_data((traj_ref_a, traj_est_aligned))
-    rpe_stats = rpe.get_all_statistics()
-    print(f"\n── RPE (translation, δ={rpe_delta:.3f} m, all_pairs) ──")
-    pprint.pprint(rpe_stats)
-    fig = plt.figure(figsize=(10, 4))
-    plot.error_array(
-        fig.gca(), rpe.error, x_array=np.arange(len(rpe.error)),
-        statistics={s: v for s, v in rpe_stats.items() if s != "sse"},
-        name="RPE", title=f"RPE  δ={rpe_delta:.3f} m, all_pairs",
-        xlabel="pair index")
-    handle_fig(fig, "compare_rpe", save_dir)
+    try:
+        rpe.process_data((traj_ref_a, traj_est_aligned))
+        rpe_stats = rpe.get_all_statistics()
+        print(f"\n── RPE (translation, δ={rpe_delta:.3f} m, all_pairs) ──")
+        pprint.pprint(rpe_stats)
+        fig = plt.figure(figsize=(10, 4))
+        plot.error_array(
+            fig.gca(), rpe.error, x_array=np.arange(len(rpe.error)),
+            statistics={s: v for s, v in rpe_stats.items() if s != "sse"},
+            name="RPE", title=f"RPE  δ={rpe_delta:.3f} m, all_pairs",
+            xlabel="pair index")
+        handle_fig(fig, "compare_rpe", save_dir)
+    except FilterException as exc:
+        print(f"  RPE skipped: {exc}")
 
-    # ── 2×3 overview (mirrors tools/replay/scripts/plot_runs.py) ────────────
-    # EKF2 / replay / live-VVO overlaid on trajectory, altitude, speed.
-    # Replay-only on σ-evolution, radar innovation hist, baro innovation.
+    # ── overlay plots (drawn twice: with EKF2, then without) ───────────────
+    # EKF2 estimate can be corrupt (poor yaw init etc.); the no-EKF set lets
+    # us inspect replay vs live VVO without that contamination.
     cov_df  = pd.read_csv(args.replay_dir / "cov_diag.csv")
     rinn_df = pd.read_csv(args.replay_dir / "radar_innov.csv")
     binn_df = pd.read_csv(args.replay_dir / "baro_innov.csv")
     cov_t_rel  = cov_df["t"].to_numpy()  + offset_us / 1e6 - t0_s
     binn_t_rel = binn_df["t"].to_numpy() + offset_us / 1e6 - t0_s
 
-    fig, axes = plt.subplots(2, 3, figsize=(17, 10))
+    def render_overlays(out_root: Path, with_ekf: bool, with_vvo: bool = True):
+        out_root.mkdir(parents=True, exist_ok=True)
+        # Local "show VVO?" predicate — short-circuits when either the run had
+        # no VVO data at all (t_vvo_rel is None) or the caller explicitly asks
+        # to hide it (with_vvo=False, the "no_vvo" pass).
+        show_vvo = with_vvo and (t_vvo_rel is not None)
+        if not with_ekf:
+            sfx = "  (no EKF2)"
+        elif not with_vvo:
+            sfx = "  (no live VVO)"
+        else:
+            sfx = ""
 
-    # [0,0] xy trajectory (top-down)
-    ax = axes[0, 0]
-    ax.plot(pos_ekf_rel[:, 0], pos_ekf_rel[:, 1], "--", color="gray",
-            lw=0.8, label="EKF2 (GT)")
-    ax.plot(pos_N_rel[:, 0],   pos_N_rel[:, 1],   color="steelblue",
-            lw=0.8, label="replay")
-    if pos_vvo_rel is not None:
-        ax.plot(pos_vvo_rel[:, 0], pos_vvo_rel[:, 1], ":",
-                color="darkorange", lw=0.8, alpha=0.8, label="live VVO")
-    ax.set_xlabel("p_x [m]"); ax.set_ylabel("p_y [m]")
-    ax.set_title("Trajectory (top-down)")
-    ax.set_aspect("equal", adjustable="datalim")
-    ax.grid(alpha=0.3); ax.legend(fontsize=8)
+        # Pose vs time — full traces, starting at their actual time offsets.
+        fig, axs = plt.subplots(3, 2, sharex="col", figsize=(12, 8))
+        for i in range(3):
+            if with_ekf:
+                axs[i, 0].plot(t_ekf_rel, pos_ekf_rel[:, i], label="EKF2 (GT)")
+            axs[i, 0].plot(t_replay_rel, pos_N_rel[:, i], label="replay", alpha=0.85)
+            if show_vvo:
+                axs[i, 0].plot(t_vvo_rel, pos_vvo_rel[:, i], ":",
+                               color="darkorange", alpha=0.7, label="live VVO")
+            axs[i, 0].set_ylabel(pos_labels[i]); axs[i, 0].grid(True, alpha=0.3)
 
-    # [0,1] altitude vs t (with replay ±σ_z band)
-    ax = axes[0, 1]
-    sig_z = np.sqrt(np.clip(cov_df["P02"].to_numpy(), 0, None))
-    pz_replay = pos_N_rel[:, 2]
-    n = min(len(pz_replay), len(sig_z), len(t_replay_rel))
-    ax.fill_between(t_replay_rel[:n], pz_replay[:n] - sig_z[:n],
-                    pz_replay[:n] + sig_z[:n], color="steelblue", alpha=0.15)
-    ax.plot(t_ekf_rel,    pos_ekf_rel[:, 2], "--", color="gray",
-            lw=0.8, label="EKF2 (GT)")
-    ax.plot(t_replay_rel, pz_replay,         color="steelblue",
-            lw=0.6, label="replay (±σ_z)")
-    if pos_vvo_rel is not None:
-        ax.plot(t_vvo_rel, pos_vvo_rel[:, 2], ":", color="darkorange",
-                lw=0.8, alpha=0.8, label="live VVO")
-    ax.set_xlabel("t [s]"); ax.set_ylabel("p_z [m]")
-    ax.set_title("Altitude")
-    ax.grid(alpha=0.3); ax.legend(fontsize=8)
+            if with_ekf:
+                axs[i, 1].plot(t_ekf_rel, eul_ekf_full[:, i], label="EKF2 (GT)")
+            axs[i, 1].plot(t_replay_rel, eul_replay_full[:, i], label="replay", alpha=0.85)
+            if show_vvo:
+                axs[i, 1].plot(t_vvo_rel, eul_vvo_full[:, i], ":",
+                               color="darkorange", alpha=0.7, label="live VVO")
+            axs[i, 1].set_ylabel(rpy_labels[i]); axs[i, 1].grid(True, alpha=0.3)
 
-    # [0,2] speed |v|
-    ax = axes[0, 2]
-    spd_ekf    = np.linalg.norm(vel_ekf, axis=1)
-    spd_replay = np.linalg.norm(vel_N,   axis=1)
-    ax.plot(t_ekf_rel,    spd_ekf,    "--", color="gray",
-            lw=0.8, label="EKF2 (GT)")
-    ax.plot(t_replay_rel, spd_replay, color="steelblue",
-            lw=0.6, label="replay")
-    if pos_vvo_rel is not None:
-        spd_vvo = np.linalg.norm(vel_vvo, axis=1)
-        ax.plot(t_vvo_rel, spd_vvo, ":", color="darkorange",
-                lw=0.8, alpha=0.8, label="live VVO")
-    ax.set_xlabel("t [s]"); ax.set_ylabel("|v| [m/s]")
-    ax.set_title("Speed")
-    ax.grid(alpha=0.3); ax.legend(fontsize=8)
+        axs[0, 0].set_title("Position vs time (per-trace origin-aligned)" + sfx)
+        axs[0, 1].set_title("Attitude vs time" + sfx)
+        axs[0, 0].legend(fontsize=8); axs[0, 1].legend(fontsize=8)
+        axs[-1, 0].set_xlabel("t [s] (since EKF2 start)")
+        axs[-1, 1].set_xlabel("t [s] (since EKF2 start)")
+        plt.tight_layout(); handle_fig(fig, "compare_pose", out_root)
 
-    # [1,0] replay covariance evolution (log-scale) — pos / vel / att RMS
-    ax = axes[1, 0]
-    sp = np.sqrt(np.clip(cov_df["P00"] + cov_df["P01"] + cov_df["P02"], 0, None) / 3)
-    sv = np.sqrt(np.clip(cov_df["P03"] + cov_df["P04"] + cov_df["P05"], 0, None) / 3)
-    sa = np.sqrt(np.clip(cov_df["P09"] + cov_df["P10"] + cov_df["P11"], 0, None) / 3)
-    ax.plot(cov_t_rel, sp, color="steelblue",   lw=0.7, label="σ_p")
-    ax.plot(cov_t_rel, sv, color="forestgreen", lw=0.7, ls="--", label="σ_v")
-    ax.plot(cov_t_rel, sa, color="crimson",     lw=0.7, ls=":",  label="σ_θ")
-    ax.set_yscale("log")
-    ax.set_xlabel("t [s]"); ax.set_ylabel("σ (rms over xyz)")
-    ax.set_title("Replay covariance evolution")
-    ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=8)
+        # XY trajectory overlay — per-trace origin-aligned, no time axis.
+        fig, ax = plt.subplots(figsize=(8, 8))
+        if with_ekf:
+            ax.plot(pos_ekf_rel[:, 0], pos_ekf_rel[:, 1], "--", color="gray",
+                    lw=0.8, label="EKF2 (GT)")
+        ax.plot(pos_N_rel[:, 0], pos_N_rel[:, 1], color="steelblue",
+                lw=0.8, label="replay")
+        if show_vvo:
+            ax.plot(pos_vvo_rel[:, 0], pos_vvo_rel[:, 1], ":",
+                    color="darkorange", lw=0.8, alpha=0.7, label="live VVO")
+        ax.set_xlabel("x [m]"); ax.set_ylabel("y [m]")
+        ax.set_title("Trajectory XY (per-trace origin-aligned)" + sfx)
+        ax.set_aspect("equal")
+        ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
+        plt.tight_layout(); handle_fig(fig, "compare_trajectory_xy", out_root)
 
-    # [1,1] radar normalized innovation histogram.
-    # Includes accepted + rejected (skipped points have NaN residual/S
-    # and are dropped by np.isfinite). Filtering to accepted-only would
-    # tautologically put 100% inside the gate's σ-threshold.
-    ax = axes[1, 1]
-    z_all = rinn_df["residual"] / np.sqrt(rinn_df["S"].clip(lower=1e-12))
-    z = np.asarray(z_all[np.isfinite(z_all)], dtype=np.float64)
-    n_acc = int((rinn_df["status"] == 0).sum())
-    n_rej = int((rinn_df["status"] == 1).sum())
-    bins = np.linspace(-5, 5, 80)
-    ax.hist(np.clip(z, -5, 5), bins=bins, density=True, alpha=0.55,
-            color="steelblue",
-            label=f"n={len(z)} (acc {n_acc}, rej {n_rej})  std={z.std():.3f}")
-    xs = np.linspace(-5, 5, 200)
-    ax.plot(xs, np.exp(-xs**2 / 2) / np.sqrt(2 * np.pi),
-            color="k", lw=1, ls="--", label="N(0,1)")
+        # Body-frame velocity vs time — full traces, common t-axis.
+        fig, axs = plt.subplots(3, 1, sharex=True, figsize=(12, 7))
+        for i, lbl in enumerate(["vx_body [m/s]", "vy_body [m/s]", "vz_body [m/s]"]):
+            if with_ekf:
+                axs[i].plot(t_ekf_rel, vel_ekf_body[:, i], label="EKF2 (GT)")
+            axs[i].plot(t_replay_rel, vel_replay_body[:, i], label="replay", alpha=0.85)
+            if show_vvo and vel_vvo_body is not None:
+                axs[i].plot(t_vvo_rel, vel_vvo_body[:, i], ":",
+                            color="darkorange", alpha=0.7, label="live VVO")
+            axs[i].set_ylabel(lbl); axs[i].grid(True, alpha=0.3); axs[i].legend(fontsize=8)
+        axs[0].set_title("Velocity vs time (body frame)" + sfx)
+        axs[-1].set_xlabel("t [s] (since EKF2 start)")
+        plt.tight_layout(); handle_fig(fig, "compare_velocity", out_root)
 
-    # Fraction of |residual / √S| inside 1, 2, 3 σ (N(0,1) reference:
-    # 68.27 / 95.45 / 99.73 %). Higher than reference → filter is too
-    # pessimistic (S over-estimated); lower → too optimistic.
-    if len(z):
-        abs_z = np.abs(z)
-        n     = len(z)
-        pct1  = 100.0 * np.sum(abs_z < 1) / n
-        pct2  = 100.0 * np.sum(abs_z < 2) / n
-        pct3  = 100.0 * np.sum(abs_z < 3) / n
-        ax.text(0.02, 0.98,
-                f"|z|<1σ: {pct1:5.1f}%  (N: 68.3%)\n"
-                f"|z|<2σ: {pct2:5.1f}%  (N: 95.4%)\n"
-                f"|z|<3σ: {pct3:5.1f}%  (N: 99.7%)",
-                transform=ax.transAxes, va="top", ha="left",
-                fontsize=7, family="monospace",
-                bbox=dict(facecolor="white", edgecolor="0.7",
-                          alpha=0.85, pad=4))
+        # 2×3 overview (mirrors tools/replay/scripts/plot_runs.py).
+        # Top row: EKF2 / replay / live-VVO overlays. Bottom row: replay-only
+        # σ-evolution, radar innovation hist, baro innovation — unchanged
+        # between the two passes.
+        fig, axes = plt.subplots(2, 3, figsize=(17, 10))
 
-    ax.set_yscale("log")
-    ax.set_xlabel("residual / √S"); ax.set_ylabel("density (log)")
-    ax.set_title("Radar normalized innovation (accepted + rejected)")
-    ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=8, loc="upper right")
+        # [0,0] xy trajectory (top-down)
+        ax = axes[0, 0]
+        if with_ekf:
+            ax.plot(pos_ekf_rel[:, 0], pos_ekf_rel[:, 1], "--", color="gray",
+                    lw=0.8, label="EKF2 (GT)")
+        ax.plot(pos_N_rel[:, 0], pos_N_rel[:, 1], color="steelblue",
+                lw=0.8, label="replay")
+        if show_vvo:
+            ax.plot(pos_vvo_rel[:, 0], pos_vvo_rel[:, 1], ":",
+                    color="darkorange", lw=0.8, alpha=0.8, label="live VVO")
+        ax.set_xlabel("p_x [m]"); ax.set_ylabel("p_y [m]")
+        ax.set_title("Trajectory (top-down)")
+        ax.set_aspect("equal", adjustable="datalim")
+        ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
-    # [1,2] baro innovation timeseries (residual + ±√S band)
-    ax = axes[1, 2]
-    bmask = ((binn_df["accepted"] == 1) | (binn_df["rejected"] == 1)).to_numpy().astype(bool)
-    if bmask.any():
-        # Force float64 — pandas occasionally returns object-dtype arrays
-        # when columns contain mixed int/float printing, which breaks
-        # matplotlib's internal np.isfinite() during fill_between.
-        btsub = np.asarray(binn_t_rel[bmask],                 dtype=np.float64)
-        sig   = np.sqrt(np.clip(
-                np.asarray(binn_df.loc[bmask, "S"],           dtype=np.float64),
-                0, None))
-        res   = np.asarray(binn_df.loc[bmask, "residual"],    dtype=np.float64)
-        ax.fill_between(btsub, -sig, sig, color="steelblue", alpha=0.15)
-        ax.plot(btsub, res, color="steelblue", lw=0.5, label="replay")
-    ax.axhline(0, color="k", lw=0.5)
-    ax.set_xlabel("t [s]"); ax.set_ylabel("Δz residual [m]")
-    ax.set_title("Baro innovation (±√S band)")
-    ax.grid(alpha=0.3); ax.legend(fontsize=8)
+        # [0,1] altitude vs t (with replay ±σ_z band)
+        ax = axes[0, 1]
+        sig_z = np.sqrt(np.clip(cov_df["P02"].to_numpy(), 0, None))
+        pz_replay = pos_N_rel[:, 2]
+        n = min(len(pz_replay), len(sig_z), len(t_replay_rel))
+        ax.fill_between(t_replay_rel[:n], pz_replay[:n] - sig_z[:n],
+                        pz_replay[:n] + sig_z[:n], color="steelblue", alpha=0.15)
+        if with_ekf:
+            ax.plot(t_ekf_rel, pos_ekf_rel[:, 2], "--", color="gray",
+                    lw=0.8, label="EKF2 (GT)")
+        ax.plot(t_replay_rel, pz_replay, color="steelblue",
+                lw=0.6, label="replay (±σ_z)")
+        if show_vvo:
+            ax.plot(t_vvo_rel, pos_vvo_rel[:, 2], ":", color="darkorange",
+                    lw=0.8, alpha=0.8, label="live VVO")
+        ax.set_xlabel("t [s]"); ax.set_ylabel("p_z [m]")
+        ax.set_title("Altitude")
+        ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
-    fig.suptitle(f"compare overview — {args.replay_dir.name} vs EKF2"
-                 + ("  (+ live VVO)" if pos_vvo_rel is not None else ""))
-    fig.tight_layout()
-    out = Path(save_dir) / "compare.png"
-    fig.savefig(out, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  saved → {out}")
+        # [0,2] speed |v|
+        ax = axes[0, 2]
+        spd_replay = np.linalg.norm(vel_N, axis=1)
+        if with_ekf:
+            spd_ekf = np.linalg.norm(vel_ekf, axis=1)
+            ax.plot(t_ekf_rel, spd_ekf, "--", color="gray",
+                    lw=0.8, label="EKF2 (GT)")
+        ax.plot(t_replay_rel, spd_replay, color="steelblue",
+                lw=0.6, label="replay")
+        if show_vvo:
+            spd_vvo = np.linalg.norm(vel_vvo, axis=1)
+            ax.plot(t_vvo_rel, spd_vvo, ":", color="darkorange",
+                    lw=0.8, alpha=0.8, label="live VVO")
+        ax.set_xlabel("t [s]"); ax.set_ylabel("|v| [m/s]")
+        ax.set_title("Speed")
+        ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
-    print(f"\nDone — outputs in {save_dir}/")
+        # [1,0] replay covariance evolution (log-scale) — pos / vel / att RMS
+        ax = axes[1, 0]
+        sp = np.sqrt(np.clip(cov_df["P00"] + cov_df["P01"] + cov_df["P02"], 0, None) / 3)
+        sv = np.sqrt(np.clip(cov_df["P03"] + cov_df["P04"] + cov_df["P05"], 0, None) / 3)
+        sa = np.sqrt(np.clip(cov_df["P09"] + cov_df["P10"] + cov_df["P11"], 0, None) / 3)
+        ax.plot(cov_t_rel, sp, color="steelblue",   lw=0.7, label="σ_p")
+        ax.plot(cov_t_rel, sv, color="forestgreen", lw=0.7, ls="--", label="σ_v")
+        ax.plot(cov_t_rel, sa, color="crimson",     lw=0.7, ls=":",  label="σ_θ")
+        ax.set_yscale("log")
+        ax.set_xlabel("t [s]"); ax.set_ylabel("σ (rms over xyz)")
+        ax.set_title("Replay covariance evolution")
+        ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=8)
+
+        # [1,1] radar normalized innovation histogram.
+        # Includes accepted + rejected (skipped points have NaN residual/S
+        # and are dropped by np.isfinite). Filtering to accepted-only would
+        # tautologically put 100% inside the gate's σ-threshold.
+        ax = axes[1, 1]
+        z_all = rinn_df["residual"] / np.sqrt(rinn_df["S"].clip(lower=1e-12))
+        z = np.asarray(z_all[np.isfinite(z_all)], dtype=np.float64)
+        n_acc = int((rinn_df["status"] == 0).sum())
+        n_rej = int((rinn_df["status"] == 1).sum())
+        bins = np.linspace(-5, 5, 80)
+        ax.hist(np.clip(z, -5, 5), bins=bins, density=True, alpha=0.55,
+                color="steelblue",
+                label=f"n={len(z)} (acc {n_acc}, rej {n_rej})  std={z.std():.3f}")
+        xs = np.linspace(-5, 5, 200)
+        ax.plot(xs, np.exp(-xs**2 / 2) / np.sqrt(2 * np.pi),
+                color="k", lw=1, ls="--", label="N(0,1)")
+
+        # Fraction of |residual / √S| inside 1, 2, 3 σ (N(0,1) reference:
+        # 68.27 / 95.45 / 99.73 %). Higher than reference → filter is too
+        # pessimistic (S over-estimated); lower → too optimistic.
+        if len(z):
+            abs_z = np.abs(z)
+            n_z   = len(z)
+            pct1  = 100.0 * np.sum(abs_z < 1) / n_z
+            pct2  = 100.0 * np.sum(abs_z < 2) / n_z
+            pct3  = 100.0 * np.sum(abs_z < 3) / n_z
+            ax.text(0.02, 0.98,
+                    f"|z|<1σ: {pct1:5.1f}%  (N: 68.3%)\n"
+                    f"|z|<2σ: {pct2:5.1f}%  (N: 95.4%)\n"
+                    f"|z|<3σ: {pct3:5.1f}%  (N: 99.7%)",
+                    transform=ax.transAxes, va="top", ha="left",
+                    fontsize=7, family="monospace",
+                    bbox=dict(facecolor="white", edgecolor="0.7",
+                              alpha=0.85, pad=4))
+
+        ax.set_yscale("log")
+        ax.set_xlabel("residual / √S"); ax.set_ylabel("density (log)")
+        ax.set_title("Radar normalized innovation (accepted + rejected)")
+        ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=8, loc="upper right")
+
+        # [1,2] baro innovation timeseries (residual + ±√S band)
+        ax = axes[1, 2]
+        bmask = ((binn_df["accepted"] == 1) | (binn_df["rejected"] == 1)).to_numpy().astype(bool)
+        if bmask.any():
+            # Force float64 — pandas occasionally returns object-dtype arrays
+            # when columns contain mixed int/float printing, which breaks
+            # matplotlib's internal np.isfinite() during fill_between.
+            btsub = np.asarray(binn_t_rel[bmask],                 dtype=np.float64)
+            sig   = np.sqrt(np.clip(
+                    np.asarray(binn_df.loc[bmask, "S"],           dtype=np.float64),
+                    0, None))
+            res   = np.asarray(binn_df.loc[bmask, "residual"],    dtype=np.float64)
+            ax.fill_between(btsub, -sig, sig, color="steelblue", alpha=0.15)
+            ax.plot(btsub, res, color="steelblue", lw=0.5, label="replay")
+        ax.axhline(0, color="k", lw=0.5)
+        ax.set_xlabel("t [s]"); ax.set_ylabel("Δz residual [m]")
+        ax.set_title("Baro innovation (±√S band)")
+        ax.grid(alpha=0.3); ax.legend(fontsize=8)
+
+        if not with_ekf:
+            title_ref = "(replay vs live VVO, no EKF2)"
+        elif not with_vvo:
+            title_ref = "vs EKF2 (no live VVO)"
+        else:
+            title_ref = "vs EKF2" + ("  (+ live VVO)" if show_vvo else "")
+        fig.suptitle(f"compare overview — {args.replay_dir.name} {title_ref}")
+        fig.tight_layout()
+        out = Path(out_root) / "compare.png"
+        fig.savefig(out, dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  saved → {out}")
+
+    render_overlays(save_dir,                with_ekf=True,  with_vvo=True)
+    render_overlays(save_dir / "no_ekf",     with_ekf=False, with_vvo=True)
+    render_overlays(save_dir / "no_vvo",     with_ekf=True,  with_vvo=False)
+
+    print(f"\nDone — outputs in {save_dir}/  (+ no_ekf/, no_vvo/)")
 
 
 if __name__ == "__main__":

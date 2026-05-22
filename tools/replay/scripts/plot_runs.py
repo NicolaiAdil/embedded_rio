@@ -108,16 +108,27 @@ def plot_radar_innov_hist(ax, runs, colors):
 
 def plot_baro_innov(ax, runs, colors):
     """Baro residual over time, with ±√S band."""
+    any_data = False
     for r, c in zip(runs, colors):
         b = r["binn"]
         b = b[(b.accepted == 1) | (b.rejected == 1)]
-        sig = np.sqrt(np.clip(b.S, 0, None))
-        ax.fill_between(b.t, -sig, sig, color=c, alpha=0.15)
-        ax.plot(b.t, b.residual, color=c, lw=0.5, label=r["name"])
+        if b.empty:
+            continue
+        # Force float64 — pandas occasionally hands back object-dtype arrays
+        # which break matplotlib's internal np.isfinite() in fill_between.
+        t   = np.asarray(b.t,        dtype=np.float64)
+        sig = np.sqrt(np.clip(np.asarray(b.S, dtype=np.float64), 0, None))
+        res = np.asarray(b.residual, dtype=np.float64)
+        ax.fill_between(t, -sig, sig, color=c, alpha=0.15)
+        ax.plot(t, res, color=c, lw=0.5, label=r["name"])
+        any_data = True
     ax.axhline(0, color="k", lw=0.5)
     ax.set_xlabel("t [s]"); ax.set_ylabel("Δz residual [m]")
-    ax.set_title("Baro innovation (±√S band)")
-    ax.grid(alpha=0.3); ax.legend(fontsize=8)
+    ax.set_title("Baro innovation (±√S band)"
+                 + ("" if any_data else "  — no accepted/rejected samples"))
+    ax.grid(alpha=0.3)
+    if any_data:
+        ax.legend(fontsize=8)
 
 
 def main():

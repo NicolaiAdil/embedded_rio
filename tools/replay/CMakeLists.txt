@@ -20,6 +20,13 @@ add_executable(rio_replay
 
 target_link_libraries(rio_replay PRIVATE rio::rio_eskf_cpp)
 
+# Read the firmware's src/config.h so replay and firmware share one source
+# of truth for aiding flags (BARO_AIDING_ENABLED, BARO_AIDING_DIFFERENTIAL,
+# RADAR_AIDING_ENABLED, ...). Replay-only macros and firmware-only macros
+# coexist there; the firmware-only ones (SD logging, USB print, pins) are
+# simply unused by replay.
+target_include_directories(rio_replay PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(rio_replay PRIVATE -Wall -Wextra -Wpedantic)
 endif()

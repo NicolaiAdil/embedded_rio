@@ -8,6 +8,18 @@
 #define RADAR_AIDING_ENABLED 1
 #define BARO_AIDING_ENABLED  1
 
+// Baro measurement mode:
+//   1 = differential (re-anchor on each accept; constrains Δz only)
+//   0 = absolute     (anchor fixed at boot; z=0 = position at first baro lock)
+#define BARO_AIDING_DIFFERENTIAL 1
+
+// Radar second-order measurement underweighting (NavFilter Best Practices §5.2.3):
+//   1 = inflate S by B = ½ tr(H_xx P H_xx P) per radar Doppler update
+//   0 = standard S = H P H^T + R (no second-order correction)
+// Costs ~42 evaluations of the radar Jacobian per accepted point; worth
+// enabling when |H P H^T| is large relative to R (large attitude uncertainty).
+#define RADAR_UNDERWEIGHTING_ENABLED 1
+
 // ── SD card logging ──────────────────────────────────────────────────────────
 // Master switch: set to 1 to enable CSV logging of sensor data to SD card.
 #define SD_LOG_ENABLED 1

@@ -24,6 +24,9 @@
 
 #include <rio/rio_eskf.h>
 
+#include "config.h"      // firmware src/config.h — single source of truth
+                         // for BARO_AIDING_ENABLED, BARO_AIDING_DIFFERENTIAL,
+                         // RADAR_AIDING_ENABLED, etc.
 #include "log_reader.h"
 
 namespace fs = std::filesystem;
@@ -36,8 +39,8 @@ static rio::Params makeParams() {
 
   p.g_W = rio::Vec3(0.0f, 0.0f, -9.80665f);
 
-  p.sigma_acc = 2.2563e-3f;
-  p.sigma_ba  = 2.2563e-4f;
+  p.sigma_acc = 1.86e-3f;
+  p.sigma_ba  = 1.86e-4f;
 
   p.sigma_gyr = 2.443461e-4f;
   p.sigma_bg  = 2.443461e-5f;
@@ -48,28 +51,29 @@ static rio::Params makeParams() {
   p.min_dt = 1e-6f;
   p.max_dt = 0.1f;
 
-  p.q_IR = rio::Quat(0.68301f, -0.18301f, -0.18301f, 0.68301f);
-  p.p_IR = rio::Vec3(-0.065f, 0.025013f, 0.020f);
+  p.q_IR = rio::Quat(0.5f, -0.5f, -0.5f, 0.5f);  // Eigen (w,x,y,z)
+  p.p_IR = rio::Vec3(0.01f, 0.03f, -0.01f);
 
   return p;
 }
 
 static constexpr rio::RadarDopplerMeasurement::Params kRadarParams{
-    /*sigma_vr=*/0.058f, /*vr_sign=*/1.0f,
-    /*gate_nsigma=*/3.0f, /*gating=*/true};
+    /*sigma_vr=*/0.12f, /*vr_sign=*/1.0f,
+    /*gate_nsigma=*/5.0f, /*gating=*/true,
+    /*underweight=*/RADAR_UNDERWEIGHTING_ENABLED != 0};
 
 static constexpr rio::BarometerDiffMeasurement::Params kBaroParams{
-    /*sigma_dz=*/0.3f, /*z_sign=*/1.0f,
-    /*gate_nsigma=*/5.0f, /*gating=*/true};
+    /*sigma_dz=*/0.30f, /*z_sign=*/1.0f,
+    /*gate_nsigma=*/3.0f, /*gating=*/true};
 
 static constexpr float P0_diag[21] = {
-  1e-6f  , 1e-6f  , 1e-6f  ,
-  1e-1f  , 1e-1f  , 1e-1f  ,
-  1e-2f  , 1e-2f  , 1e-2f  ,
-  1.1e-3f, 1.1e-3f, 1e-8f  ,
-  1e-4f  , 1e-4f  , 1e-4f  ,
-  2.0e-5f, 2.0e-5f, 2.0e-5f,
-  1.0e-2f, 1.0e-2f, 1.0e-2f,
+  1e-6f  , 1e-6f  , 1e-6f  , // ego position (m)
+  1e-6f  , 1e-6f  , 1e-6f  , // ego velocity (m/s)
+  1e-4f  , 1e-4f  , 1e-4f  , // accelerometer bias (m/s²)
+  1e-2f  , 1e-2f  , 1e-2f  , // ego attitude (rad): roll/pitch from gravity, yaw unknown
+  1e-5f  , 1e-5f  , 1e-5f  , // gyroscope bias (rad/s)
+  2.0e-3f, 2.0e-3f, 2.0e-3f, // radar position relative to IMU (m)
+  1.0e-4f, 1.0e-4f, 1.0e-4f, // radar attitude relative to IMU (rad)
 };
 
 // ── Output writers ────────────────────────────────────────────────────────────
@@ -99,7 +103,10 @@ void writeCovHeader(std::FILE* f) {
 }
 
 void writeRadarHeader(std::FILE* f) {
-  std::fprintf(f, "t,point_idx,status,residual,S,norm\n");
+  // B is the second-order underweighting term added to S (S = H P H^T + R + B).
+  // 0 when RADAR_UNDERWEIGHTING_ENABLED is off; the column is still emitted so
+  // downstream tooling has a stable schema.
+  std::fprintf(f, "t,point_idx,status,residual,S,norm,B\n");
 }
 
 void writeBaroHeader(std::FILE* f) {
@@ -147,11 +154,12 @@ void writeRadarInnov(std::FILE* f, float t,
   for (size_t i = 0; i < updates.size(); ++i) {
     const float r = updates[i].residual;
     const float S = updates[i].S;
+    const float B = updates[i].B;
     const float norm = (S > 0.0f && std::isfinite(r) && std::isfinite(S))
                            ? std::fabs(r) / std::sqrt(S)
                            : NAN;
-    std::fprintf(f, "%.6f,%zu,%u,%.6g,%.6g,%.6g\n",
-                 t, i, legacyStatus(updates[i].status), r, S, norm);
+    std::fprintf(f, "%.6f,%zu,%u,%.6g,%.6g,%.6g,%.6g\n",
+                 t, i, legacyStatus(updates[i].status), r, S, norm, B);
   }
 }
 
@@ -188,6 +196,12 @@ void writeBaroInnov(std::FILE* f, float t,
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv) {
+  // Aiding mode comes from src/config.h (shared with firmware). Flip the
+  // #defines there and rebuild to switch behavior — no CLI flags.
+  constexpr bool radar_enabled = (RADAR_AIDING_ENABLED != 0);
+  constexpr bool baro_enabled  = (BARO_AIDING_ENABLED  != 0);
+  constexpr bool baro_absolute = (BARO_AIDING_DIFFERENTIAL == 0);
+
   if (argc != 3) {
     std::fprintf(stderr, "usage: %s <log.csv> <out_dir>\n", argv[0]);
     return 2;
@@ -227,9 +241,12 @@ int main(int argc, char** argv) {
   x0.q_IR = params.q_IR;
   eskf.reset(x0, P0_diag, 0.0f);
 
-  // Persistent measurement object — holds the differential baro anchor
-  // across calls.
-  rio::BarometerDiffMeasurement baro_meas(kBaroParams);
+  // Persistent measurement object — holds the baro anchor across calls.
+  // In differential mode the anchor moves on every accept; in absolute mode
+  // it stays at the boot-time reference.
+  rio::BarometerDiffMeasurement::Params baro_params = kBaroParams;
+  baro_params.reset_anchor_on_accept = !baro_absolute;
+  rio::BarometerDiffMeasurement baro_meas(baro_params);
 
   bool             time_init = false;
   bool             att_init  = false;
@@ -281,7 +298,7 @@ int main(int argc, char** argv) {
       case replay::EventKind::RADAR_FRAME: {
         ++n_radar_frames;
         n_radar_pts += ev.radar.size();
-        if (!att_init || ev.radar.empty()) break;
+        if (!att_init || ev.radar.empty() || !radar_enabled) break;
 
         rio::MeasurementContext ctx{&last_imu};
         std::vector<rio::ScalarUpdate> updates;
@@ -313,7 +330,7 @@ int main(int argc, char** argv) {
 
       case replay::EventKind::BARO: {
         ++n_baro;
-        if (!att_init) break;
+        if (!att_init || !baro_enabled) break;
 
         baro_meas.setSample(ev.baro);
         const rio::ScalarUpdate u = eskf.applyScalar(baro_meas);
@@ -334,12 +351,18 @@ int main(int argc, char** argv) {
   std::fclose(out.radar);
   std::fclose(out.baro);
 
+  const char* radar_mode_tag =
+      !radar_enabled ? " (aiding disabled)" :
+      (RADAR_UNDERWEIGHTING_ENABLED != 0 ? " (mode: 2nd-order underweighting)" : "");
+  const char* baro_mode_tag =
+      !baro_enabled ? " (aiding disabled)" :
+      (baro_absolute ? " (mode: absolute)" : " (mode: differential)");
   std::fprintf(stderr,
     "replay complete: imu=%zu radar_frames=%zu radar_pts=%zu baro=%zu\n"
-    "  radar: %zu accepted, %zu rejected, %zu skipped\n"
-    "  baro:  %zu accepted, %zu rejected, %zu skipped\n",
+    "  radar: %zu accepted, %zu rejected, %zu skipped%s\n"
+    "  baro:  %zu accepted, %zu rejected, %zu skipped%s\n",
     n_imu, n_radar_frames, n_radar_pts, n_baro,
-    n_radar_accepted, n_radar_rejected, n_radar_skipped,
-    n_baro_accepted,  n_baro_rejected,  n_baro_skipped);
+    n_radar_accepted, n_radar_rejected, n_radar_skipped, radar_mode_tag,
+    n_baro_accepted,  n_baro_rejected,  n_baro_skipped,  baro_mode_tag);
   return 0;
 }
