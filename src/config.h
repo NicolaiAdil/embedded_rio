@@ -11,7 +11,7 @@
 // Baro measurement mode:
 //   1 = differential (re-anchor on each accept; constrains Δz only)
 //   0 = absolute     (anchor fixed at boot; z=0 = position at first baro lock)
-#define BARO_AIDING_DIFFERENTIAL 1
+#define BARO_AIDING_DIFFERENTIAL 0
 
 // Radar second-order measurement underweighting (NavFilter Best Practices §5.2.3):
 //   1 = inflate S by B = ½ tr(H_xx P H_xx P) per radar Doppler update
