@@ -8,6 +8,8 @@
 #undef B3
 
 #include <rio/rio_eskf.h>
+#include <rio/measurements/radar_doppler.h>
+#include <rio/measurements/barometer.h>
 #include "bmi08x.h"
 #include "xwr6843aop.h"
 #include "bmp388.h"
@@ -50,8 +52,8 @@ static const rio::RadarDopplerMeasurement::Params g_radar_p{
     /*gate_nsigma=*/5.0f, /*gating=*/true,
     /*underweight=*/RADAR_UNDERWEIGHTING_ENABLED != 0};
 
-static rio::BarometerDiffMeasurement g_baro_meas(
-    rio::BarometerDiffMeasurement::Params{
+static rio::BarometerMeasurement g_baro_meas(
+    rio::BarometerMeasurement::Params{
         /*sigma_dz=*/0.3f, /*z_sign=*/1.0f,
         /*gate_nsigma=*/5.0f, /*gating=*/true,
         /*reset_anchor_on_accept=*/BARO_AIDING_DIFFERENTIAL != 0});
@@ -318,10 +320,10 @@ static void processRadar(const RadarFrame& frame) {
         g_radar_p,
         rio::Vec3(frame.raw[i].x, frame.raw[i].y, frame.raw[i].z),
         frame.raw[i].vr);
-    const rio::ScalarUpdate u = eskf.applyScalar(m, ctx);
+    const rio::MeasurementUpdate u = eskf.correct(m, ctx);
     switch (u.status) {
-      case rio::ScalarUpdate::Accepted: ++n_acc; break;
-      case rio::ScalarUpdate::Rejected: ++n_rej; break;
+      case rio::MeasurementUpdate::Accepted: ++n_acc; break;
+      case rio::MeasurementUpdate::Rejected: ++n_rej; break;
       default:                          ++n_skp; break;
     }
   }
@@ -385,10 +387,10 @@ static void processBaro() {
   baro.temp_c      = temp_c;
 
   g_baro_meas.setSample(baro);
-  const rio::ScalarUpdate u = eskf.applyScalar(g_baro_meas);
+  const rio::MeasurementUpdate u = eskf.correct(g_baro_meas);
 
 #if USB_PRINT_ENABLED
-  if (u.status == rio::ScalarUpdate::Rejected) {
+  if (u.status == rio::MeasurementUpdate::Rejected) {
     Serial.print("BARO rejected: dz_meas=");
     Serial.print(g_baro_meas.lastDzMeas(), 3);
     Serial.print(" dz_pred=");
@@ -399,13 +401,13 @@ static void processBaro() {
 #endif
 
   switch (u.status) {
-    case rio::ScalarUpdate::Accepted: ++s_baro_acc; break;
-    case rio::ScalarUpdate::Rejected: ++s_baro_rej; break;
-    case rio::ScalarUpdate::Skipped:  ++s_baro_skp; break;
+    case rio::MeasurementUpdate::Accepted: ++s_baro_acc; break;
+    case rio::MeasurementUpdate::Rejected: ++s_baro_rej; break;
+    case rio::MeasurementUpdate::Skipped:  ++s_baro_skp; break;
     default: break;  // NotReady (anchor just initialized) — don't count
   }
 
-  if (u.status == rio::ScalarUpdate::Accepted) {
+  if (u.status == rio::MeasurementUpdate::Accepted) {
     publishState(baro.t, /*quality=*/100);
   }
 #endif
