@@ -23,6 +23,8 @@
 #include <vector>
 
 #include <rio/rio_eskf.h>
+#include <rio/measurements/radar_doppler.h>
+#include <rio/measurements/barometer.h>
 
 #include "config.h"      // firmware src/config.h — single source of truth
                          // for BARO_AIDING_ENABLED, BARO_AIDING_DIFFERENTIAL,
@@ -58,12 +60,12 @@ static rio::Params makeParams() {
 }
 
 static constexpr rio::RadarDopplerMeasurement::Params kRadarParams{
-    /*sigma_vr=*/0.12f, /*vr_sign=*/1.0f,
+    /*sigma_vr=*/0.058f, /*vr_sign=*/1.0f,
     /*gate_nsigma=*/3.0f, /*gating=*/true,
     /*underweight=*/RADAR_UNDERWEIGHTING_ENABLED != 0};
 
-static constexpr rio::BarometerDiffMeasurement::Params kBaroParams{
-    /*sigma_dz=*/0.30f, /*z_sign=*/1.0f,
+static constexpr rio::BarometerMeasurement::Params kBaroParams{
+    /*sigma_dz=*/0.20f, /*z_sign=*/1.0f,
     /*gate_nsigma=*/3.0f, /*gating=*/true};
 
 static constexpr float P0_diag[21] = {
@@ -139,18 +141,18 @@ void writeCovRow(std::FILE* f, float t, const char* src, const rio::Mat21& P) {
   std::fprintf(f, "\n");
 }
 
-// Map ScalarUpdate::Status to the legacy 0/1/2 status codes used by the
+// Map MeasurementUpdate::Status to the legacy 0/1/2 status codes used by the
 // radar_innov.csv consumers (0=accepted, 1=rejected, 2=skipped).
-unsigned legacyStatus(rio::ScalarUpdate::Status s) {
+unsigned legacyStatus(rio::MeasurementUpdate::Status s) {
   switch (s) {
-    case rio::ScalarUpdate::Accepted: return 0;
-    case rio::ScalarUpdate::Rejected: return 1;
+    case rio::MeasurementUpdate::Accepted: return 0;
+    case rio::MeasurementUpdate::Rejected: return 1;
     default:                          return 2;  // Skipped or NotReady
   }
 }
 
 void writeRadarInnov(std::FILE* f, float t,
-                     const std::vector<rio::ScalarUpdate>& updates) {
+                     const std::vector<rio::MeasurementUpdate>& updates) {
   for (size_t i = 0; i < updates.size(); ++i) {
     const float r = updates[i].residual;
     const float S = updates[i].S;
@@ -164,17 +166,17 @@ void writeRadarInnov(std::FILE* f, float t,
 }
 
 void writeBaroInnov(std::FILE* f, float t,
-                    const rio::ScalarUpdate& u,
-                    const rio::BarometerDiffMeasurement& m) {
+                    const rio::MeasurementUpdate& u,
+                    const rio::BarometerMeasurement& m) {
   const float r    = u.residual;
   const float S    = u.S;
   const float norm = (S > 0.0f && std::isfinite(r) && std::isfinite(S))
                          ? std::fabs(r) / std::sqrt(S)
                          : NAN;
   const bool initialized = m.justInitialized();
-  const bool accepted    = (u.status == rio::ScalarUpdate::Accepted);
-  const bool rejected    = (u.status == rio::ScalarUpdate::Rejected);
-  const bool skipped     = (u.status == rio::ScalarUpdate::Skipped);
+  const bool accepted    = (u.status == rio::MeasurementUpdate::Accepted);
+  const bool rejected    = (u.status == rio::MeasurementUpdate::Rejected);
+  const bool skipped     = (u.status == rio::MeasurementUpdate::Skipped);
   // Match the old CSV: when only the anchor was initialized, dz_meas /
   // dz_pred / residual / S are all reported as zero.
   const float dz_meas  = initialized ? 0.f : m.lastDzMeas();
@@ -244,9 +246,9 @@ int main(int argc, char** argv) {
   // Persistent measurement object — holds the baro anchor across calls.
   // In differential mode the anchor moves on every accept; in absolute mode
   // it stays at the boot-time reference.
-  rio::BarometerDiffMeasurement::Params baro_params = kBaroParams;
+  rio::BarometerMeasurement::Params baro_params = kBaroParams;
   baro_params.reset_anchor_on_accept = !baro_absolute;
-  rio::BarometerDiffMeasurement baro_meas(baro_params);
+  rio::BarometerMeasurement baro_meas(baro_params);
 
   bool             time_init = false;
   bool             att_init  = false;
@@ -301,16 +303,16 @@ int main(int argc, char** argv) {
         if (!att_init || ev.radar.empty() || !radar_enabled) break;
 
         rio::MeasurementContext ctx{&last_imu};
-        std::vector<rio::ScalarUpdate> updates;
+        std::vector<rio::MeasurementUpdate> updates;
         updates.reserve(ev.radar.size());
         size_t n_acc = 0, n_rej = 0, n_skp = 0;
         for (const auto& d : ev.radar) {
           rio::RadarDopplerMeasurement m(kRadarParams, d.u_R, d.vr);
-          const rio::ScalarUpdate u = eskf.applyScalar(m, ctx);
+          const rio::MeasurementUpdate u = eskf.correct(m, ctx);
           updates.push_back(u);
           switch (u.status) {
-            case rio::ScalarUpdate::Accepted: ++n_acc; break;
-            case rio::ScalarUpdate::Rejected: ++n_rej; break;
+            case rio::MeasurementUpdate::Accepted: ++n_acc; break;
+            case rio::MeasurementUpdate::Rejected: ++n_rej; break;
             default:                          ++n_skp; break;
           }
         }
@@ -333,10 +335,10 @@ int main(int argc, char** argv) {
         if (!att_init || !baro_enabled) break;
 
         baro_meas.setSample(ev.baro);
-        const rio::ScalarUpdate u = eskf.applyScalar(baro_meas);
-        if (u.status == rio::ScalarUpdate::Accepted) ++n_baro_accepted;
-        if (u.status == rio::ScalarUpdate::Rejected) ++n_baro_rejected;
-        if (u.status == rio::ScalarUpdate::Skipped)  ++n_baro_skipped;
+        const rio::MeasurementUpdate u = eskf.correct(baro_meas);
+        if (u.status == rio::MeasurementUpdate::Accepted) ++n_baro_accepted;
+        if (u.status == rio::MeasurementUpdate::Rejected) ++n_baro_rejected;
+        if (u.status == rio::MeasurementUpdate::Skipped)  ++n_baro_skipped;
 
         writeBaroInnov(out.baro,  ev.t_s, u, baro_meas);
         writeStateRow (out.state, ev.t_s, "BAR", eskf.getState());
