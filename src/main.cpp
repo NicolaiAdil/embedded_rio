@@ -2,15 +2,15 @@
 #include <Wire.h>
 
 #include "config.h"
-#include "bmi08x.h"
-#include "bmp388.h"
-#include "xwr6843aop.h"
-#include "sd_logger.h"
+#include "drivers/bmi08x.h"
+#include "drivers/bmp388.h"
+#include "drivers/xwr6843aop.h"
+#include "io/sd_logger.h"
 
-#include "eskf_node.h"
-#include "telemetry.h"
-#include "debug.h"
-#include "status_leds.h"
+#include "filter/eskf_node.h"
+#include "io/telemetry.h"
+#include "io/debug.h"
+#include "io/status_leds.h"
 
 static constexpr ImuType IMU_TYPE = ImuType::BMI088;
 

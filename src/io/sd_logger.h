@@ -5,7 +5,7 @@
 #if SD_LOG_ENABLED
 
 #include <rio/rio_eskf.h>
-#include "xwr6843aop.h"
+#include "drivers/xwr6843aop.h"
 
 // Call once in setup(). Opens LOG0000.CSV (or next available index).
 // Returns false if SD init or file open fails.

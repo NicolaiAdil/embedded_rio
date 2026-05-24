@@ -1,4 +1,4 @@
-#include "bmp388.h"
+#include "drivers/bmp388.h"
 #include <Wire.h>
 
 #include "config.h"

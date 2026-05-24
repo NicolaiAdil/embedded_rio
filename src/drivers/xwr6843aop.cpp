@@ -5,7 +5,7 @@
 #undef B2
 #undef B3
 
-#include "xwr6843aop.h"
+#include "drivers/xwr6843aop.h"
 #include "config.h"
 #include <string.h>
 #include <math.h>

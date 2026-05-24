@@ -1,4 +1,4 @@
-#include "eskf_node.h"
+#include "filter/eskf_node.h"
 
 #include <Arduino.h>
 
@@ -6,9 +6,9 @@
 #include <rio/measurements/barometer.h>
 
 #include "config.h"
-#include "debug.h"
-#include "telemetry.h"
-#include "sd_logger.h"
+#include "io/debug.h"
+#include "io/telemetry.h"
+#include "io/sd_logger.h"
 
 namespace eskf_node {
 namespace {

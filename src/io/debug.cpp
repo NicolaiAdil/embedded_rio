@@ -1,10 +1,10 @@
-#include "debug.h"
+#include "io/debug.h"
 
 #include <Arduino.h>
 #include <math.h>
 
 #include "config.h"
-#include "eskf_node.h"
+#include "filter/eskf_node.h"
 
 namespace debug {
 

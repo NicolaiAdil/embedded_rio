@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 #include <rio/rio_eskf.h>
-#include "xwr6843aop.h"
+#include "drivers/xwr6843aop.h"
 
 namespace eskf_node {
 

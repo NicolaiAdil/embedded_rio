@@ -1,4 +1,4 @@
-#include "telemetry.h"
+#include "io/telemetry.h"
 
 #include <Arduino.h>
 #include <common/mavlink.h>
