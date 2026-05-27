@@ -34,7 +34,6 @@ import os
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import argparse
-import copy
 import json
 import pprint
 import sys
@@ -180,18 +179,37 @@ def transform_replay_to_ned(pos_W, vel_W, q_W_wxyz):
     return pos_N, vel_N, q_N_wxyz
 
 
-def align_origin_pose(pos, q_wxyz):
-    """Translate first position to (0,0,0) and rotate about z so initial
-    yaw = 0. Each trace (EKF2, replay, live VVO) starts at a different
-    heading, so position-only origin alignment leaves the XY traces
-    rotated relative to each other and unable to be overlaid. This applies
-    R_z(-yaw0) to positions and pre-multiplies quaternions, preserving
-    roll, pitch, altitude, |v|, and body-frame velocity."""
-    q0_xyzw = q_wxyz[0, [1, 2, 3, 0]]
-    yaw0    = Rotation.from_quat(q0_xyzw).as_euler("xyz")[2]
-    R_align = Rotation.from_euler("z", -yaw0)
-    pos_a   = R_align.apply(pos - pos[0])
-    q_xyzw  = q_wxyz[:, [1, 2, 3, 0]]
+def align_origin_pose(pos, q_wxyz, ref_idx=0,
+                      target_pos=None, target_q_wxyz=None):
+    """SE(3) alignment: apply a single rigid transform so that the pose at
+    ref_idx becomes (target_pos, target_q_wxyz). Default target is the
+    canonical origin (0, identity).
+
+    Used to align all three traces (EKF2, replay, live VVO) to a common
+    reference at the first moment all three exist. Setting the target's
+    rotation to EKF2's actual orientation at ref_idx (rather than identity)
+    keeps EKF2 in its native NED frame — it becomes a pure translation by
+    -pos_ekf[ref_idx] — while replay/VVO get full SE(3) rotated+translated
+    to land on the same pose. That rotation absorbs static mount
+    misalignment between the filter and EKF2 (e.g. a few degrees of pitch
+    from an imperfect sensor mount): without it, the constant body-frame
+    offset shows up as a growing trajectory rotation when the vehicle
+    moves through different attitudes."""
+    if target_pos is None:
+        target_pos = np.zeros(3)
+    if target_q_wxyz is None:
+        target_q_wxyz = np.array([1.0, 0.0, 0.0, 0.0])
+
+    p_local       = pos[ref_idx]
+    q_local_xyzw  = q_wxyz[ref_idx, [1, 2, 3, 0]]
+    q_target_xyzw = np.asarray(target_q_wxyz)[[1, 2, 3, 0]]
+
+    R_local  = Rotation.from_quat(q_local_xyzw)
+    R_target = Rotation.from_quat(q_target_xyzw)
+    R_align  = R_target * R_local.inv()
+
+    pos_a    = R_align.apply(pos - p_local) + target_pos
+    q_xyzw   = q_wxyz[:, [1, 2, 3, 0]]
     q_a_xyzw = (R_align * Rotation.from_quat(q_xyzw)).as_quat()
     q_a_wxyz = q_a_xyzw[:, [3, 0, 1, 2]]
     return pos_a, q_a_wxyz
@@ -228,6 +246,65 @@ def compute_time_offset_via_first_publish(replay_dir, ts_vvo):
     return first_vvo_us - first_replay_us
 
 
+def render_raw_sources(out_dir, ts_ekf, pos_ekf, q_ekf, vel_ekf,
+                       ts_vvo, pos_vvo, q_vvo, vel_vvo,
+                       t_replay_s, pos_W, vel_W, q_W,
+                       pos_N, vel_N, q_N):
+    """Sanity-check plots of each input source in its native frame, with
+    no trimming, alignment, or cross-source transformation applied. One
+    figure per source under <out_dir>/raw/ with position, attitude,
+    velocity, and XY trajectory."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _euler_deg(q_wxyz):
+        q_xyzw = q_wxyz[:, [1, 2, 3, 0]]
+        return np.rad2deg(np.unwrap(
+            Rotation.from_quat(q_xyzw).as_euler("xyz"), axis=0))
+
+    def _one(tag, t_s, pos, q, vel, pos_frame, vel_frame):
+        eul = _euler_deg(q)
+        t_rel = t_s - t_s[0]
+        fig, axs = plt.subplots(2, 2, figsize=(13, 9))
+        for i, lbl in enumerate(["x", "y", "z"]):
+            axs[0, 0].plot(t_rel, pos[:, i], label=lbl)
+        axs[0, 0].set_xlabel("t [s] (since first sample)")
+        axs[0, 0].set_ylabel(f"position [m]  ({pos_frame})")
+        axs[0, 0].grid(alpha=0.3); axs[0, 0].legend(fontsize=8)
+        for i, lbl in enumerate(["roll", "pitch", "yaw"]):
+            axs[0, 1].plot(t_rel, eul[:, i], label=lbl)
+        axs[0, 1].set_xlabel("t [s] (since first sample)")
+        axs[0, 1].set_ylabel("attitude [deg]")
+        axs[0, 1].grid(alpha=0.3); axs[0, 1].legend(fontsize=8)
+        for i, lbl in enumerate(["vx", "vy", "vz"]):
+            axs[1, 0].plot(t_rel, vel[:, i], label=lbl)
+        axs[1, 0].set_xlabel("t [s] (since first sample)")
+        axs[1, 0].set_ylabel(f"velocity [m/s]  ({vel_frame})")
+        axs[1, 0].grid(alpha=0.3); axs[1, 0].legend(fontsize=8)
+        axs[1, 1].plot(pos[:, 0], pos[:, 1], lw=0.6, color="steelblue")
+        axs[1, 1].scatter(pos[0, 0],  pos[0, 1],  c="green", s=25, zorder=3, label="start")
+        axs[1, 1].scatter(pos[-1, 0], pos[-1, 1], c="red",   s=25, zorder=3, label="end")
+        axs[1, 1].set_xlabel("x [m]"); axs[1, 1].set_ylabel("y [m]")
+        axs[1, 1].set_title(f"XY trajectory  ({pos_frame})")
+        axs[1, 1].set_aspect("equal", adjustable="datalim")
+        axs[1, 1].grid(alpha=0.3); axs[1, 1].legend(fontsize=8)
+        fig.suptitle(f"raw {tag}  ({len(t_s)} samples, {t_rel[-1]:.2f}s span)")
+        fig.tight_layout()
+        out = out_dir / f"raw_{tag}.svg"
+        fig.savefig(out, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  saved → {out}")
+
+    _one("ekf2",                ts_ekf / 1e6, pos_ekf, q_ekf, vel_ekf,
+         pos_frame="PX4 NED", vel_frame="PX4 NED")
+    _one("vvo",                 ts_vvo / 1e6, pos_vvo, q_vvo, vel_vvo,
+         pos_frame="PX4 NED", vel_frame="body FRD")
+    _one("replay_teensy_world", t_replay_s,   pos_W,   q_W,   vel_W,
+         pos_frame="Teensy world (z-up)", vel_frame="Teensy world (z-up)")
+    _one("replay_ned",          t_replay_s,   pos_N,   q_N,   vel_N,
+         pos_frame="NED (q_t · Teensy)", vel_frame="NED (q_t · Teensy)")
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -247,6 +324,12 @@ def main():
     ap.add_argument("-t", "--tol", "--max_time_diff", type=float, default=0.2,
                     dest="tol",
                     help="evo association tolerance in seconds (default 0.2)")
+    ap.add_argument("--skip-seconds", type=float, default=0.0,
+                    dest="skip_seconds",
+                    help="Skip this many seconds of data after the first VVO "
+                         "publish before aligning/plotting (default 0). The "
+                         "first samples can be noisy (filter still settling) "
+                         "and contaminate the origin alignment.")
     args = ap.parse_args()
 
     if not args.replay_dir.is_dir():
@@ -264,19 +347,15 @@ def main():
     print(f"estimator_local_position : {len(ts_ekf)} msgs, "
           f"{(ts_ekf[-1]-ts_ekf[0])/1e6:.2f}s")
 
-    # Drop EKF2 samples before the first VVO message: in that window EKF2 is
-    # still solving for yaw (and z bias) and the estimate jumps around, which
-    # contaminates origin-alignment and APE.
-    ekf_keep = ts_ekf >= ts_vvo[0]
-    n_drop = int(np.sum(~ekf_keep))
-    if n_drop:
-        dropped_s = (ts_vvo[0] - ts_ekf[0]) / 1e6
-        print(f"  trimming {n_drop} EKF2 samples before first VVO "
-              f"({dropped_s:.2f}s of pre-VVO yaw-init data)")
-        ts_ekf  = ts_ekf[ekf_keep]
-        pos_ekf = pos_ekf[ekf_keep]
-        q_ekf   = q_ekf[ekf_keep]
-        vel_ekf = vel_ekf[ekf_keep]
+    # Alignment cutoff: first VVO publish, plus optional skip window.
+    # Computed BEFORE any trimming so the original first VVO timestamp
+    # remains available for the time-offset anchor below. Pre-cutoff
+    # samples are dropped from all three traces after we've used the
+    # original ts_vvo[0] for offset computation.
+    t_cut_us = float(ts_vvo[0]) + args.skip_seconds * 1e6
+    if args.skip_seconds:
+        print(f"\n--skip-seconds={args.skip_seconds}s  →  alignment cutoff at "
+              f"t={t_cut_us/1e6:.3f}s (first VVO = {ts_vvo[0]/1e6:.3f}s)")
 
     # ── time offset Teensy → PX4 ───────────────────────────────────────────
     # Primary: anchor first replay 'RAD' publish to first live VVO entry.
@@ -306,9 +385,56 @@ def main():
           f"first PX4-aligned t = {ts_replay_us[0]/1e6:.3f}s "
           f"(EKF2 first = {ts_ekf[0]/1e6:.3f}s)")
 
-    # ── build trajectories and associate ───────────────────────────────────
-    traj_ref = make_pose_trajectory(ts_ekf,        pos_ekf, q_ekf)
-    traj_est = make_pose_trajectory(ts_replay_us,  pos_N,   q_N)
+    # ── raw sanity-check plots (pre-trim, native frames) ─────────────────
+    print(f"\nraw plots → {save_dir}/raw/")
+    render_raw_sources(
+        Path(save_dir) / "raw",
+        ts_ekf, pos_ekf, q_ekf, vel_ekf,
+        ts_vvo, pos_vvo, q_vvo, vel_vvo,
+        t_replay_s, pos_W, vel_W, q_W,
+        pos_N, vel_N, q_N)
+
+    # ── trim all three traces at t_cut_us ─────────────────────────────────
+    # Done now (after offset is computed and replay is in PX4 µs) so the
+    # cutoff applies uniformly across EKF2, replay, and VVO.
+    def _trim(name, ts, *arrays):
+        keep = ts >= t_cut_us
+        n = int(np.sum(~keep))
+        if n:
+            print(f"  trimming {n} {name} samples before cutoff")
+        return (ts[keep],) + tuple(a[keep] for a in arrays)
+
+    ts_ekf, pos_ekf, q_ekf, vel_ekf = _trim(
+        "EKF2", ts_ekf, pos_ekf, q_ekf, vel_ekf)
+    ts_vvo, pos_vvo, q_vvo, vel_vvo = _trim(
+        "VVO",  ts_vvo, pos_vvo, q_vvo, vel_vvo)
+    ts_replay_us, pos_N, vel_N, q_N = _trim(
+        "replay", ts_replay_us, pos_N, vel_N, q_N)
+
+    if len(ts_ekf) == 0 or len(ts_vvo) == 0 or len(ts_replay_us) == 0:
+        raise SystemExit(
+            f"--skip-seconds={args.skip_seconds}s left one of the traces "
+            f"empty (EKF2={len(ts_ekf)}, VVO={len(ts_vvo)}, "
+            f"replay={len(ts_replay_us)}). Pick a smaller value.")
+
+    # ── SE(3) align all traces to EKF2's first post-trim pose ─────────────
+    # The first sample of each trace is at-or-just-after t_cut_us, so they
+    # all describe the same physical instant (the first moment EKF2 and
+    # VVO both exist, after the optional --skip-seconds). Aligning each
+    # trace's pose at index 0 to (0, q_ekf[0]) puts EKF2 at the canonical
+    # origin in its native NED orientation, and rotates replay/VVO to
+    # match — that rotation absorbs static mount misalignment between
+    # filter and EKF2 so subsequent attitudes/positions compare directly.
+    ref_q_wxyz = q_ekf[0].copy()
+    pos_ekf_rel, q_ekf_rel = align_origin_pose(
+        pos_ekf, q_ekf, ref_idx=0, target_q_wxyz=ref_q_wxyz)
+    pos_N_rel,   q_N_rel   = align_origin_pose(
+        pos_N,   q_N,   ref_idx=0, target_q_wxyz=ref_q_wxyz)
+
+    # Build trajectories from the already-aligned arrays — no further
+    # evo align_origin call needed, since both share a common ref pose.
+    traj_ref = make_pose_trajectory(ts_ekf,        pos_ekf_rel, q_ekf_rel)
+    traj_est = make_pose_trajectory(ts_replay_us,  pos_N_rel,   q_N_rel)
 
     n_replay_before = traj_est.num_poses
     traj_ref_a, traj_est_a = sync.associate_trajectories(
@@ -321,8 +447,7 @@ def main():
     if matched_pct < 50:
         print("  fewer than 50% matched — time sync is likely wrong.")
 
-    traj_est_aligned = copy.deepcopy(traj_est_a)
-    traj_est_aligned.align_origin(traj_ref_a)
+    traj_est_aligned = traj_est_a  # already aligned via the SE(3) step above
 
     # Common time origin = first EKF2 sample. Time axis is "seconds since
     # EKF2 start" so EKF2 spans 0..end and replay/VVO sit at their actual
@@ -332,12 +457,6 @@ def main():
     # Full traces (not post-association) for time-series plots.
     t_ekf_rel    = ts_ekf       / 1e6 - t0_s
     t_replay_rel = ts_replay_us / 1e6 - t0_s
-
-    # Per-trace pose origin-align: translate to (0,0,0) AND rotate about
-    # z so initial yaw = 0. Position-only alignment leaves XY traces
-    # rotated relative to each other when initial headings differ.
-    pos_ekf_rel, q_ekf_rel = align_origin_pose(pos_ekf, q_ekf)
-    pos_N_rel,   q_N_rel   = align_origin_pose(pos_N,   q_N)
 
     def _euler_deg(q_wxyz):
         q_xyzw = q_wxyz[:, [1, 2, 3, 0]]
@@ -359,7 +478,8 @@ def main():
     eul_vvo_full = None
     if args.plot_vvo:
         t_vvo_rel    = ts_vvo / 1e6 - t0_s
-        pos_vvo_rel, q_vvo_rel = align_origin_pose(pos_vvo, q_vvo)
+        pos_vvo_rel, q_vvo_rel = align_origin_pose(
+            pos_vvo, q_vvo, ref_idx=0, target_q_wxyz=ref_q_wxyz)
         eul_vvo_full = _euler_deg(q_vvo_rel)
 
     # ── plots ──────────────────────────────────────────────────────────────
@@ -447,7 +567,6 @@ def main():
     cov_df  = pd.read_csv(args.replay_dir / "cov_diag.csv")
     rinn_df = pd.read_csv(args.replay_dir / "radar_innov.csv")
     binn_df = pd.read_csv(args.replay_dir / "baro_innov.csv")
-    cov_t_rel  = cov_df["t"].to_numpy()  + offset_us / 1e6 - t0_s
     binn_t_rel = binn_df["t"].to_numpy() + offset_us / 1e6 - t0_s
 
     def render_overlays(out_root: Path, with_ekf: bool, with_vvo: bool = True):
@@ -576,18 +695,36 @@ def main():
         ax.set_title("Speed")
         ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
-        # [1,0] replay covariance evolution (log-scale) — pos / vel / att RMS
+        # [1,0] accepted vs rejected radar points per frame — stacked bar.
+        # One bar per radar frame, total height = points in that frame,
+        # blue = accepted (status==0), red = rejected (status==1).
         ax = axes[1, 0]
-        sp = np.sqrt(np.clip(cov_df["P00"] + cov_df["P01"] + cov_df["P02"], 0, None) / 3)
-        sv = np.sqrt(np.clip(cov_df["P03"] + cov_df["P04"] + cov_df["P05"], 0, None) / 3)
-        sa = np.sqrt(np.clip(cov_df["P09"] + cov_df["P10"] + cov_df["P11"], 0, None) / 3)
-        ax.plot(cov_t_rel, sp, color="steelblue",   lw=0.7, label="σ_p")
-        ax.plot(cov_t_rel, sv, color="forestgreen", lw=0.7, ls="--", label="σ_v")
-        ax.plot(cov_t_rel, sa, color="crimson",     lw=0.7, ls=":",  label="σ_θ")
-        ax.set_yscale("log")
-        ax.set_xlabel("t [s]"); ax.set_ylabel("σ (rms over xyz)")
-        ax.set_title("Replay covariance evolution")
-        ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=8)
+        rinn_g  = rinn_df.groupby("t", sort=True)["status"]
+        t_frame = np.asarray(rinn_g.size().index, dtype=np.float64)
+        n_total = rinn_g.size().to_numpy()
+        n_acc   = rinn_g.apply(lambda s: int((s == 0).sum())).to_numpy()
+        n_rej   = n_total - n_acc
+        t_frame_rel = t_frame + offset_us / 1e6 - t0_s
+        # Bar width = median frame spacing (fall back to 0.05 s if a single
+        # frame). Slight under-fill so adjacent bars don't merge visually.
+        dt = np.median(np.diff(t_frame_rel)) if len(t_frame_rel) > 1 else 0.05
+        width = 0.9 * dt
+        ax.bar(t_frame_rel, n_acc, width=width, color="steelblue",
+               linewidth=0, label="accepted")
+        ax.bar(t_frame_rel, n_rej, width=width, bottom=n_acc, color="crimson",
+               linewidth=0, label="rejected")
+        n_acc_all = int(n_acc.sum())
+        n_tot_all = int(n_total.sum())
+        rate = 100.0 * n_acc_all / max(n_tot_all, 1)
+        ax.text(0.02, 0.98,
+                f"accepted: {n_acc_all}/{n_tot_all}  ({rate:.1f}%)",
+                transform=ax.transAxes, va="top", ha="left",
+                fontsize=8, family="monospace",
+                bbox=dict(facecolor="white", edgecolor="0.7",
+                          alpha=0.85, pad=4))
+        ax.set_xlabel("t [s]"); ax.set_ylabel("# radar points / frame")
+        ax.set_title("Accepted vs rejected radar measurements")
+        ax.grid(alpha=0.3, axis="y"); ax.legend(fontsize=8, loc="upper right")
 
         # [1,1] radar normalized innovation histogram.
         # Includes accepted + rejected (skipped points have NaN residual/S

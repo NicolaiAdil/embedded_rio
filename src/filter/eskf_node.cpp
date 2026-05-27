@@ -41,22 +41,22 @@ rio::Params makeParams() {
 
 const rio::RadarDopplerMeasurement::Params g_radar_p{
     /*sigma_vr=*/0.038f, /*vr_sign=*/1.0f,
-    /*gate_nsigma=*/5.0f, /*gating=*/true,
+    /*gate_nsigma=*/3.0f, /*gating=*/true,
     /*underweight=*/RADAR_UNDERWEIGHTING_ENABLED != 0};
 
 rio::BarometerMeasurement g_baro_meas(
     rio::BarometerMeasurement::Params{
-        /*sigma_dz=*/0.3f, /*z_sign=*/1.0f,
-        /*gate_nsigma=*/5.0f, /*gating=*/true,
+        /*sigma_dz=*/0.20f, /*z_sign=*/1.0f,
+        /*gate_nsigma=*/3.0f, /*gating=*/true,
         /*reset_anchor_on_accept=*/BARO_AIDING_DIFFERENTIAL != 0});
 
 constexpr float P0_diag[21] = {
   1e-6f  , 1e-6f  , 1e-6f  , // ego position (m)
-  1e-1f  , 1e-1f  , 1e-1f  , // ego velocity (m/s)
-  1e-2f  , 1e-2f  , 1e-2f  , // accelerometer bias (m/s²)
-  1.1e-3f, 1.1e-3f, 1e-8f , // ego attitude (rad): roll/pitch from gravity, yaw unknown
-  1e-4f  , 1e-4f  , 1e-4f  , // gyroscope bias (rad/s)
-  2.0e-5f, 2.0e-5f, 2.0e-5f, // radar position relative to IMU (m)
+  1e-6f  , 1e-6f  , 1e-6f  , // ego velocity (m/s)
+  1e-4f  , 1e-4f  , 1e-4f  , // accelerometer bias (m/s²)
+  1e-2f  , 1e-2f  , 1e-2f  , // ego attitude (rad): roll/pitch from gravity, yaw unknown
+  1e-5f  , 1e-5f  , 1e-5f  , // gyroscope bias (rad/s)
+  2.0e-3f, 2.0e-3f, 2.0e-3f, // radar position relative to IMU (m)
   1.0e-4f, 1.0e-4f, 1.0e-4f, // radar attitude relative to IMU (rad)
 };
 

@@ -34,6 +34,9 @@ endif
 ifdef TOL
   ARGS += --tol $(TOL)
 endif
+ifdef SKIP
+  ARGS += --skip-seconds $(SKIP)
+endif
 
 .PHONY: all build run compare clean help
 
@@ -93,3 +96,4 @@ help:
 	@echo "  shortcuts:"
 	@echo "    NO_VVO=1     → adds --no-vvo   (suppress live VVO overlay)"
 	@echo "    TOL=0.3      → adds --tol 0.3  (association tolerance, s)"
+	@echo "    SKIP=2       → adds --skip-seconds 2  (drop first 2s after VVO start)"
