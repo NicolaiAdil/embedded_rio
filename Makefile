@@ -13,6 +13,7 @@
 
 LOG   ?= $(or $(RIO_LOG),data/field/2105/csv/LOG0012.CSV)
 ULG   ?= $(or $(RIO_ULG),data/field/2105/ulog/log_24_2026-5-21-20-47-18.ulg)
+MOCAP ?= $(RIO_MOCAP)
 
 # Report where a variable's value came from. Used by `make help`.
 # Args: $1 = variable name (e.g. LOG), $2 = env var name (e.g. RIO_LOG).
@@ -36,6 +37,18 @@ ifdef TOL
 endif
 ifdef SKIP
   ARGS += --skip-seconds $(SKIP)
+endif
+ifneq ($(strip $(MOCAP)),)
+  ARGS += --mocap "$(MOCAP)"
+endif
+ifdef MOCAP_OFFSET
+  ARGS += --mocap-offset $(MOCAP_OFFSET)
+endif
+ifdef MOCAP_SYNC
+  ARGS += --mocap-sync-with $(MOCAP_SYNC)
+endif
+ifdef MOCAP_FRAME
+  ARGS += --mocap-body-frame $(MOCAP_FRAME)
 endif
 
 .PHONY: all build run compare clean help
@@ -76,9 +89,10 @@ help:
 	@echo "  make compare   — run compare_with_ulog.py OUT vs ULG"
 	@echo "  make clean     — remove $(BUILD_DIR)"
 	@echo ""
-	@echo "inputs (set RIO_LOG / RIO_ULG in your env, or override on CLI):"
-	@echo "  LOG=$(LOG)  [$(call src,LOG,RIO_LOG)]"
-	@echo "  ULG=$(ULG)  [$(call src,ULG,RIO_ULG)]"
+	@echo "inputs (set RIO_LOG / RIO_ULG / RIO_MOCAP in your env, or override on CLI):"
+	@echo "  LOG=$(LOG)      [$(call src,LOG,RIO_LOG)]"
+	@echo "  ULG=$(ULG)      [$(call src,ULG,RIO_ULG)]"
+	@echo "  MOCAP=$(MOCAP)  [$(call src,MOCAP,RIO_MOCAP)]"
 	@echo ""
 	@echo "other variables:"
 	@echo "  NAME=$(NAME)         (derived from LOG basename)"
@@ -97,3 +111,7 @@ help:
 	@echo "    NO_VVO=1     → adds --no-vvo   (suppress live VVO overlay)"
 	@echo "    TOL=0.3      → adds --tol 0.3  (association tolerance, s)"
 	@echo "    SKIP=2       → adds --skip-seconds 2  (drop first 2s after VVO start)"
+	@echo "    MOCAP=path/to.bag    → adds --mocap (overlay ROS1 mocap bag)"
+	@echo "    MOCAP_OFFSET=1.23    → adds --mocap-offset 1.23  (override |v|-autosync, s)"
+	@echo "    MOCAP_SYNC=vvo       → adds --mocap-sync-with vvo  (replay|vvo|ekf2; default replay)"
+	@echo "    MOCAP_FRAME=frd      → adds --mocap-body-frame frd  (default bld: applies BLD→FRD body fix)"

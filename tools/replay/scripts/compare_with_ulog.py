@@ -45,6 +45,7 @@ import matplotlib.pyplot as plt
 
 from pyulog import ULog
 from scipy.spatial.transform import Rotation
+from scipy.signal import correlate, correlation_lags
 
 from evo.tools import log as evo_log
 evo_log.configure_logging(verbose=True, debug=False, silent=False)
@@ -246,10 +247,190 @@ def compute_time_offset_via_first_publish(replay_dir, ts_vvo):
     return first_vvo_us - first_replay_us
 
 
+def load_mocap_bag(bag_path: Path, topic: str = "/qualisys/Body_1/odom"):
+    """Load a ROS1 mocap bag (nav_msgs/Odometry). Returns:
+        ts_s   : (N,) ROS header timestamp in wall-clock seconds (float64)
+        pos    : (N, 3) position in mocap world frame
+        q_wxyz : (N, 4) attitude quaternion
+        vel    : (N, 3) linear velocity in body frame (Odometry convention:
+                 twist is in child_frame_id, which Qualisys publishes
+                 wrt the rigid-body local frame).
+    """
+    from rosbags.rosbag1 import Reader
+    from rosbags.typesys import Stores, get_typestore
+    typestore = get_typestore(Stores.ROS1_NOETIC)
+
+    ts_list, pos_list, q_list, vel_list = [], [], [], []
+    with Reader(bag_path) as reader:
+        conns = [c for c in reader.connections if c.topic == topic]
+        if not conns:
+            avail = sorted({c.topic for c in reader.connections})
+            raise SystemExit(
+                f"topic '{topic}' not found in {bag_path}.\n"
+                f"available topics: {avail}")
+        if conns[0].msgtype != "nav_msgs/msg/Odometry":
+            raise SystemExit(
+                f"unsupported mocap msgtype {conns[0].msgtype!r} on {topic} "
+                f"— expected nav_msgs/msg/Odometry")
+        for cn, _, raw in reader.messages(connections=conns):
+            m = typestore.deserialize_ros1(raw, cn.msgtype)
+            stamp = m.header.stamp
+            ts_list.append(stamp.sec + stamp.nanosec * 1e-9)
+            p = m.pose.pose.position;       pos_list.append((p.x, p.y, p.z))
+            q = m.pose.pose.orientation;    q_list.append((q.w, q.x, q.y, q.z))
+            v = m.twist.twist.linear;       vel_list.append((v.x, v.y, v.z))
+    return (np.asarray(ts_list, dtype=np.float64),
+            np.asarray(pos_list, dtype=np.float64),
+            np.asarray(q_list,   dtype=np.float64),
+            np.asarray(vel_list, dtype=np.float64))
+
+
+def auto_align_mocap_via_velocity(ts_mocap_s, vel_mocap,
+                                  ts_ref_us, vel_ref, ref_name, save_dir):
+    """Find the time offset that best aligns |v_mocap| with |v_ref| via
+    cross-correlation on a 50 Hz uniform grid. |v| is frame-invariant, so
+    it doesn't matter that mocap twist is body-frame and the reference may
+    be NED (replay/EKF2) or body FRD (VVO). Returns offset_s such that
+        t_px4_us = (ts_mocap_s - ts_mocap_s[0]) * 1e6
+                   + ts_ref_us[0] + offset_s * 1e6
+    Also saves a before/after |v| overlay so the alignment can be eyeballed.
+    """
+    spd_mocap = np.linalg.norm(vel_mocap, axis=1)
+    spd_ref   = np.linalg.norm(vel_ref,   axis=1)
+    t_mocap_rel = ts_mocap_s - ts_mocap_s[0]
+    t_ref_rel   = (ts_ref_us - ts_ref_us[0]) / 1e6
+
+    dt    = 0.02
+    t_max = max(float(t_mocap_rel[-1]), float(t_ref_rel[-1]))
+    grid  = np.arange(0.0, t_max + dt, dt)
+    s_m   = np.interp(grid, t_mocap_rel, spd_mocap, left=0.0, right=0.0)
+    s_r   = np.interp(grid, t_ref_rel,   spd_ref,   left=0.0, right=0.0)
+    # Zero-mean + unit-std → normalized cross-correlation, robust to
+    # different absolute speed magnitudes between sources.
+    s_m = (s_m - s_m.mean()) / (s_m.std() + 1e-12)
+    s_r = (s_r - s_r.mean()) / (s_r.std() + 1e-12)
+
+    corr = correlate(s_r, s_m, mode="full")
+    lags = correlation_lags(len(s_r), len(s_m), mode="full")
+    best_lag = int(lags[int(np.argmax(corr))])
+    offset_s = float(best_lag) * dt
+    print(f"  |v| cross-correlation (ref = {ref_name}) → mocap offset = "
+          f"{offset_s:+.3f} s   (peak lag = {best_lag} samples @ {1/dt:.0f} Hz)")
+
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
+    fig, axs = plt.subplots(2, 1, sharex=True, figsize=(12, 6))
+    axs[0].plot(t_ref_rel,   spd_ref,   color="steelblue",  lw=0.8, label=f"{ref_name} |v|")
+    axs[0].plot(t_mocap_rel, spd_mocap, color="darkorange", lw=0.8, label="mocap |v|")
+    axs[0].set_title("Before alignment (each trace from its own t=0)")
+    axs[0].set_ylabel("|v| [m/s]"); axs[0].grid(alpha=0.3); axs[0].legend(fontsize=8)
+    axs[1].plot(t_ref_rel,             spd_ref,   color="steelblue", lw=0.8, label=f"{ref_name} |v|")
+    axs[1].plot(t_mocap_rel + offset_s, spd_mocap, color="darkorange", lw=0.8,
+                label=f"mocap |v|  (shifted {offset_s:+.3f} s)")
+    axs[1].set_title("After alignment")
+    axs[1].set_ylabel("|v| [m/s]"); axs[1].set_xlabel(f"t [s] ({ref_name}-relative)")
+    axs[1].grid(alpha=0.3); axs[1].legend(fontsize=8)
+    fig.tight_layout()
+    out = Path(save_dir) / "mocap_velocity_sync.svg"
+    fig.savefig(out, bbox_inches="tight"); plt.close(fig)
+    print(f"  saved → {out}")
+    return offset_s
+
+
+def evaluate_pair(gt_traj, gt_name, est_traj, est_name, t0_s, tol, save_dir):
+    """Compute and plot position-error + APE + RPE of `est_traj` against
+    `gt_traj`. Saves three SVGs per pair (suffixed with `est_name`) so
+    multiple estimates against a common GT don't clobber each other."""
+    from evo.core.filters import FilterException
+    if est_traj.num_poses == 0 or gt_traj.num_poses == 0:
+        print(f"  {est_name} vs {gt_name}: empty trajectory, skipping")
+        return
+    n_est_before = est_traj.num_poses
+    a_gt, a_est = sync.associate_trajectories(
+        gt_traj, est_traj, max_diff=tol,
+        first_name=f"{gt_name} (GT)", snd_name=est_name)
+    if a_est.num_poses < 3:
+        print(f"  {est_name} vs {gt_name}: only {a_est.num_poses} paired "
+              f"within {tol*1000:.0f} ms — skipping metrics")
+        return
+    matched_pct = 100.0 * a_est.num_poses / max(n_est_before, 1)
+    print(f"\n=== {est_name} vs {gt_name}  (matched "
+          f"{a_est.num_poses}/{n_est_before}, {matched_pct:.1f}%) ===")
+
+    p_ref = a_gt.positions_xyz
+    p_est = a_est.positions_xyz
+    t_paired_rel = np.asarray(a_gt.timestamps) - t0_s
+
+    # Position error
+    err      = p_est - p_ref
+    err_norm = np.linalg.norm(err, axis=1)
+    rms      = np.sqrt(np.mean(err**2, axis=0))
+    fig, axs = plt.subplots(4, 1, sharex=True, figsize=(12, 9))
+    for i, (lbl, col) in enumerate(zip(
+            ["ΔX [m]", "ΔY [m]", "ΔZ [m]"],
+            ["steelblue", "darkorange", "forestgreen"])):
+        axs[i].plot(t_paired_rel, err[:, i], color=col, lw=0.8)
+        axs[i].axhline(0, color="black", lw=0.5, ls=":")
+        axs[i].set_ylabel(lbl); axs[i].grid(True, alpha=0.3)
+    axs[3].plot(t_paired_rel, err_norm, color="crimson", lw=0.8)
+    axs[3].set_ylabel("|ΔP| [m]"); axs[3].grid(True, alpha=0.3)
+    axs[0].set_title(
+        f"Position error: {est_name} − {gt_name}  "
+        f"(RMS: X={rms[0]:.3f}  Y={rms[1]:.3f}  Z={rms[2]:.3f} m)")
+    axs[-1].set_xlabel("t [s] (since EKF2 start)")
+    plt.tight_layout()
+    handle_fig(fig, f"compare_position_error_{est_name}", save_dir)
+
+    # APE
+    ape = metrics.APE(metrics.PoseRelation.translation_part)
+    ape.process_data((a_gt, a_est))
+    ape_stats = ape.get_all_statistics()
+    print(f"── APE ({est_name} vs {gt_name}) ──"); pprint.pprint(ape_stats)
+    fig = plt.figure(figsize=(10, 4))
+    plot.error_array(
+        fig.gca(), ape.error, x_array=t_paired_rel,
+        statistics={s: v for s, v in ape_stats.items() if s != "sse"},
+        name="APE",
+        title=f"APE  (GT = {gt_name}, est = {est_name})",
+        xlabel="t [s] (since EKF2 start)")
+    handle_fig(fig, f"compare_ape_{est_name}", save_dir)
+
+    fig = plt.figure(figsize=(8, 8))
+    ax = plot.prepare_axis(fig, plot.PlotMode.xy)
+    plot.traj(ax, plot.PlotMode.xy, a_gt, "--", "gray", f"{gt_name} (GT)")
+    plot.traj_colormap(ax, a_est, ape.error, plot.PlotMode.xy,
+                       title=f"{est_name} trajectory coloured by APE",
+                       min_map=ape_stats["min"], max_map=ape_stats["max"])
+    ax.legend()
+    handle_fig(fig, f"compare_ape_trajectory_{est_name}", save_dir)
+
+    # RPE
+    traj_length = float(np.sum(np.linalg.norm(np.diff(p_ref, axis=0), axis=1)))
+    rpe_delta   = float(np.clip(traj_length * 0.1, 0.05, 10.0))
+    print(f"GT length: {traj_length:.3f} m  →  RPE δ = {rpe_delta:.3f} m")
+    rpe = metrics.RPE(pose_relation=metrics.PoseRelation.translation_part,
+                      delta=rpe_delta, delta_unit=Unit.meters, all_pairs=True)
+    try:
+        rpe.process_data((a_gt, a_est))
+        rpe_stats = rpe.get_all_statistics()
+        print(f"── RPE ({est_name} vs {gt_name}, δ={rpe_delta:.3f} m) ──")
+        pprint.pprint(rpe_stats)
+        fig = plt.figure(figsize=(10, 4))
+        plot.error_array(
+            fig.gca(), rpe.error, x_array=np.arange(len(rpe.error)),
+            statistics={s: v for s, v in rpe_stats.items() if s != "sse"},
+            name="RPE",
+            title=f"RPE: {est_name} vs {gt_name}  (δ={rpe_delta:.3f} m)",
+            xlabel="pair index")
+        handle_fig(fig, f"compare_rpe_{est_name}", save_dir)
+    except FilterException as exc:
+        print(f"  RPE skipped: {exc}")
+
+
 def render_raw_sources(out_dir, ts_ekf, pos_ekf, q_ekf, vel_ekf,
                        ts_vvo, pos_vvo, q_vvo, vel_vvo,
                        t_replay_s, pos_W, vel_W, q_W,
-                       pos_N, vel_N, q_N):
+                       pos_N, vel_N, q_N,
+                       mocap=None):
     """Sanity-check plots of each input source in its native frame, with
     no trimming, alignment, or cross-source transformation applied. One
     figure per source under <out_dir>/raw/ with position, attitude,
@@ -299,10 +480,15 @@ def render_raw_sources(out_dir, ts_ekf, pos_ekf, q_ekf, vel_ekf,
          pos_frame="PX4 NED", vel_frame="PX4 NED")
     _one("vvo",                 ts_vvo / 1e6, pos_vvo, q_vvo, vel_vvo,
          pos_frame="PX4 NED", vel_frame="body FRD")
-    _one("replay_teensy_world", t_replay_s,   pos_W,   q_W,   vel_W,
-         pos_frame="Teensy world (z-up)", vel_frame="Teensy world (z-up)")
-    _one("replay_ned",          t_replay_s,   pos_N,   q_N,   vel_N,
-         pos_frame="NED (q_t · Teensy)", vel_frame="NED (q_t · Teensy)")
+    if t_replay_s is not None:
+        _one("replay_teensy_world", t_replay_s, pos_W, q_W, vel_W,
+             pos_frame="Teensy world (z-up)", vel_frame="Teensy world (z-up)")
+        _one("replay_ned",          t_replay_s, pos_N, q_N, vel_N,
+             pos_frame="NED (q_t · Teensy)", vel_frame="NED (q_t · Teensy)")
+    if mocap is not None:
+        ts_moc_s, pos_moc, q_moc, vel_moc = mocap
+        _one("mocap", ts_moc_s, pos_moc, q_moc, vel_moc,
+             pos_frame="mocap world", vel_frame="body (Odometry child_frame)")
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -330,6 +516,27 @@ def main():
                          "publish before aligning/plotting (default 0). The "
                          "first samples can be noisy (filter still settling) "
                          "and contaminate the origin alignment.")
+    ap.add_argument("--mocap", type=Path, default=None,
+                    help="Optional ROS1 bag with mocap odometry to overlay "
+                         "on the plots (no APE/RPE computed against mocap).")
+    ap.add_argument("--mocap-topic", default="/qualisys/Body_1/odom",
+                    help="nav_msgs/Odometry topic in the mocap bag.")
+    ap.add_argument("--mocap-offset", type=float, default=None,
+                    help="Manual override (seconds) for the mocap→PX4 time "
+                         "offset. Default: auto via |v| cross-correlation. "
+                         "Eyeball the value from cmp/mocap_velocity_sync.svg.")
+    ap.add_argument("--mocap-sync-with", choices=("replay", "vvo", "ekf2"),
+                    default="replay",
+                    help="Which trace's |v| to cross-correlate mocap against "
+                         "for the auto time-sync (default: replay). Ignored "
+                         "when --mocap-offset is given.")
+    ap.add_argument("--mocap-body-frame", choices=("frd", "bld"),
+                    default="bld",
+                    help="Mocap rigid-body frame convention (default: bld). "
+                         "'bld' applies a 180°-about-Z body rotation to "
+                         "convert Back-Left-Down → Forward-Right-Down so "
+                         "body-frame velocity/attitude match VVO. Use 'frd' "
+                         "for bags whose rigid body is set up correctly.")
     args = ap.parse_args()
 
     if not args.replay_dir.is_dir():
@@ -350,40 +557,121 @@ def main():
     # Alignment cutoff: first VVO publish, plus optional skip window.
     # Computed BEFORE any trimming so the original first VVO timestamp
     # remains available for the time-offset anchor below. Pre-cutoff
-    # samples are dropped from all three traces after we've used the
-    # original ts_vvo[0] for offset computation.
+    # samples are dropped from all traces after we've used the original
+    # ts_vvo[0] for offset computation.
     t_cut_us = float(ts_vvo[0]) + args.skip_seconds * 1e6
     if args.skip_seconds:
         print(f"\n--skip-seconds={args.skip_seconds}s  →  alignment cutoff at "
               f"t={t_cut_us/1e6:.3f}s (first VVO = {ts_vvo[0]/1e6:.3f}s)")
 
-    # ── time offset Teensy → PX4 ───────────────────────────────────────────
-    # Primary: anchor first replay 'RAD' publish to first live VVO entry.
-    offset_us = compute_time_offset_via_first_publish(args.replay_dir, ts_vvo)
-    # Diagnostic: timestamp_sample method (unreliable without TIMESYNC).
-    offset_diag, std_us, n_samp = compute_time_offset(df_vvo)
-    print(f"\nTime offset (PX4 − Teensy):")
-    print(f"  via first VVO publish : {offset_us/1e6:+.6f} s   "
-          f"({offset_us:+.0f} µs)   [USED]")
-    print(f"  via timestamp_sample  : {offset_diag/1e6:+.6f} s   "
-          f"std={std_us/1e3:.3f} ms  ({n_samp} samples)  [diagnostic]")
+    # ── detect replay availability ────────────────────────────────────────
+    # state.csv may be missing entirely or present-but-empty (header only,
+    # no RAD rows — e.g. the input CSV had no radar frames). When absent
+    # we skip all replay-only work (time offset, APE/RPE, σ/innov panels)
+    # and produce a VVO+EKF2(+mocap) comparison.
+    has_replay = False
+    state_csv = args.replay_dir / "state.csv"
+    if state_csv.is_file():
+        try:
+            df_chk = pd.read_csv(state_csv, usecols=["t", "source"])
+            if (df_chk["source"] == "RAD").any():
+                has_replay = True
+        except (ValueError, pd.errors.EmptyDataError):
+            pass
+    if not has_replay:
+        print("\nreplay state.csv missing or has no 'RAD' rows — running "
+              "in no-replay mode (VVO + EKF2"
+              + (" + mocap" if args.mocap is not None else "") + ").")
 
-    # Persist for downstream scripts.
     Path(save_dir).mkdir(parents=True, exist_ok=True)
-    with (Path(save_dir) / "time_offset.json").open("w") as f:
-        json.dump({"offset_us": offset_us,
-                   "offset_us_via_timestamp_sample": offset_diag,
-                   "std_us_via_timestamp_sample": std_us,
-                   "n_vvo_samples": n_samp}, f, indent=2)
 
-    # ── load replay, transform to NED, apply offset ───────────────────────
-    t_replay_s, pos_W, vel_W, q_W = load_replay_state(args.replay_dir)
-    pos_N, vel_N, q_N = transform_replay_to_ned(pos_W, vel_W, q_W)
-    ts_replay_us = t_replay_s * 1e6 + offset_us
-    print(f"\nreplay/state.csv         : {len(t_replay_s)} rows, "
-          f"{t_replay_s[-1]-t_replay_s[0]:.2f}s   "
-          f"first PX4-aligned t = {ts_replay_us[0]/1e6:.3f}s "
-          f"(EKF2 first = {ts_ekf[0]/1e6:.3f}s)")
+    # ── time offset Teensy → PX4 (replay only) ────────────────────────────
+    offset_us = 0.0
+    t_replay_s = pos_W = vel_W = q_W = None
+    pos_N = vel_N = q_N = ts_replay_us = None
+    if has_replay:
+        # Primary: anchor first replay 'RAD' publish to first live VVO.
+        offset_us = compute_time_offset_via_first_publish(args.replay_dir, ts_vvo)
+        # Diagnostic: timestamp_sample method (unreliable without TIMESYNC).
+        offset_diag, std_us, n_samp = compute_time_offset(df_vvo)
+        print(f"\nTime offset (PX4 − Teensy):")
+        print(f"  via first VVO publish : {offset_us/1e6:+.6f} s   "
+              f"({offset_us:+.0f} µs)   [USED]")
+        print(f"  via timestamp_sample  : {offset_diag/1e6:+.6f} s   "
+              f"std={std_us/1e3:.3f} ms  ({n_samp} samples)  [diagnostic]")
+        with (Path(save_dir) / "time_offset.json").open("w") as f:
+            json.dump({"offset_us": offset_us,
+                       "offset_us_via_timestamp_sample": offset_diag,
+                       "std_us_via_timestamp_sample": std_us,
+                       "n_vvo_samples": n_samp}, f, indent=2)
+
+        # ── load replay, transform to NED, apply offset ───────────────────
+        t_replay_s, pos_W, vel_W, q_W = load_replay_state(args.replay_dir)
+        pos_N, vel_N, q_N = transform_replay_to_ned(pos_W, vel_W, q_W)
+        ts_replay_us = t_replay_s * 1e6 + offset_us
+        print(f"\nreplay/state.csv         : {len(t_replay_s)} rows, "
+              f"{t_replay_s[-1]-t_replay_s[0]:.2f}s   "
+              f"first PX4-aligned t = {ts_replay_us[0]/1e6:.3f}s "
+              f"(EKF2 first = {ts_ekf[0]/1e6:.3f}s)")
+
+    # ── optional mocap bag ─────────────────────────────────────────────────
+    # Loaded BEFORE trimming so the full mocap trajectory is available for
+    # |v| cross-correlation against the chosen reference (replay by default,
+    # optionally vvo or ekf2). Time mapping uses the reference's first
+    # un-trimmed timestamp as the PX4-time anchor.
+    ts_mocap_us = pos_mocap = q_mocap = vel_mocap = None
+    mocap_raw_pkg = None
+    if args.mocap is not None:
+        if not args.mocap.is_file():
+            raise SystemExit(f"missing --mocap bag: {args.mocap}")
+        print(f"\nmocap bag                 : {args.mocap}")
+        ts_mocap_s, pos_mocap, q_mocap, vel_mocap = load_mocap_bag(
+            args.mocap, args.mocap_topic)
+        print(f"  {args.mocap_topic}: {len(ts_mocap_s)} msgs, "
+              f"{ts_mocap_s[-1] - ts_mocap_s[0]:.2f}s")
+
+        # Body-frame correction. Qualisys rigid bodies are sometimes set
+        # up with "forward" pointing toward the drone's back, producing
+        # Back-Left-Down (BLD) body conventions. To match PX4 FRD we
+        # right-multiply each quaternion by R_z(180°) and negate the
+        # body-frame velocity's X/Y components. World frame is left to
+        # the Umeyama trajectory alignment below.
+        if args.mocap_body_frame == "bld":
+            q_z180_R = Rotation.from_quat([0., 0., 1., 0.])
+            q_xyzw   = q_mocap[:, [1, 2, 3, 0]]
+            q_corr_xyzw = (Rotation.from_quat(q_xyzw) * q_z180_R).as_quat()
+            q_mocap   = q_corr_xyzw[:, [3, 0, 1, 2]]
+            vel_mocap = vel_mocap * np.array([-1., -1., 1.])
+            print("  applied BLD→FRD body-frame correction "
+                  "(neg vx/vy, right-multiplied q by R_z(180°))")
+        mocap_raw_pkg = (ts_mocap_s, pos_mocap, q_mocap, vel_mocap)
+
+        # Pick the |v| reference for sync. All three are in PX4 µs already.
+        # Auto-fall-back when the requested ref isn't available (no replay
+        # in this run, or --no-vvo was passed).
+        sync_refs = {
+            "replay": (ts_replay_us, vel_N,   "replay")  if has_replay   else None,
+            "vvo":    (ts_vvo,       vel_vvo, "live VVO") if args.plot_vvo else None,
+            "ekf2":   (ts_ekf,       vel_ekf, "EKF2"),
+        }
+        chosen = args.mocap_sync_with
+        if sync_refs[chosen] is None:
+            fb = "vvo" if sync_refs["vvo"] is not None else "ekf2"
+            print(f"  --mocap-sync-with={chosen} unavailable → "
+                  f"falling back to {fb}")
+            chosen = fb
+        ref_ts, ref_vel, ref_name = sync_refs[chosen]
+        args.mocap_sync_with = chosen
+
+        if args.mocap_offset is not None:
+            mocap_offset_s = float(args.mocap_offset)
+            print(f"  using manual --mocap-offset = {mocap_offset_s:+.3f} s "
+                  f"(relative to {ref_name})")
+        else:
+            mocap_offset_s = auto_align_mocap_via_velocity(
+                ts_mocap_s, vel_mocap, ref_ts, ref_vel, ref_name, save_dir)
+        ts_mocap_us = ((ts_mocap_s - ts_mocap_s[0]) * 1e6
+                       + float(ref_ts[0]) + mocap_offset_s * 1e6)
 
     # ── raw sanity-check plots (pre-trim, native frames) ─────────────────
     print(f"\nraw plots → {save_dir}/raw/")
@@ -392,7 +680,8 @@ def main():
         ts_ekf, pos_ekf, q_ekf, vel_ekf,
         ts_vvo, pos_vvo, q_vvo, vel_vvo,
         t_replay_s, pos_W, vel_W, q_W,
-        pos_N, vel_N, q_N)
+        pos_N, vel_N, q_N,
+        mocap=mocap_raw_pkg)
 
     # ── trim all three traces at t_cut_us ─────────────────────────────────
     # Done now (after offset is computed and replay is in PX4 µs) so the
@@ -408,55 +697,59 @@ def main():
         "EKF2", ts_ekf, pos_ekf, q_ekf, vel_ekf)
     ts_vvo, pos_vvo, q_vvo, vel_vvo = _trim(
         "VVO",  ts_vvo, pos_vvo, q_vvo, vel_vvo)
-    ts_replay_us, pos_N, vel_N, q_N = _trim(
-        "replay", ts_replay_us, pos_N, vel_N, q_N)
+    if has_replay:
+        ts_replay_us, pos_N, vel_N, q_N = _trim(
+            "replay", ts_replay_us, pos_N, vel_N, q_N)
+    if ts_mocap_us is not None:
+        # Mocap typically records well before VVO starts and after VVO
+        # stops; clip to the VVO window so the overlay covers only the
+        # interval where the live odometry stream is meaningful.
+        ts_mocap_us, pos_mocap, q_mocap, vel_mocap = _trim(
+            "mocap (pre-VVO)", ts_mocap_us, pos_mocap, q_mocap, vel_mocap)
+        if len(ts_mocap_us) > 0:
+            t_vvo_end_us = float(ts_vvo[-1])
+            keep = ts_mocap_us <= t_vvo_end_us
+            n_drop = int(np.sum(~keep))
+            if n_drop:
+                print(f"  trimming {n_drop} mocap samples after VVO end")
+            ts_mocap_us = ts_mocap_us[keep]
+            pos_mocap   = pos_mocap[keep]
+            q_mocap     = q_mocap[keep]
+            vel_mocap   = vel_mocap[keep]
+        if len(ts_mocap_us) == 0:
+            print("  mocap empty after trim — dropping from plots")
+            ts_mocap_us = None
 
-    if len(ts_ekf) == 0 or len(ts_vvo) == 0 or len(ts_replay_us) == 0:
+    n_replay_left = len(ts_replay_us) if has_replay else -1
+    if len(ts_ekf) == 0 or len(ts_vvo) == 0 or (has_replay and n_replay_left == 0):
         raise SystemExit(
             f"--skip-seconds={args.skip_seconds}s left one of the traces "
             f"empty (EKF2={len(ts_ekf)}, VVO={len(ts_vvo)}, "
-            f"replay={len(ts_replay_us)}). Pick a smaller value.")
+            f"replay={n_replay_left}). Pick a smaller value.")
 
-    # ── SE(3) align all traces to EKF2's first post-trim pose ─────────────
+    # ── SE(3) align all traces so they start at (0, identity) ─────────────
     # The first sample of each trace is at-or-just-after t_cut_us, so they
     # all describe the same physical instant (the first moment EKF2 and
     # VVO both exist, after the optional --skip-seconds). Aligning each
-    # trace's pose at index 0 to (0, q_ekf[0]) puts EKF2 at the canonical
-    # origin in its native NED orientation, and rotates replay/VVO to
-    # match — that rotation absorbs static mount misalignment between
-    # filter and EKF2 so subsequent attitudes/positions compare directly.
-    ref_q_wxyz = q_ekf[0].copy()
+    # trace's pose at index 0 to (0, identity) means every trace's xyz
+    # starts at 0 and rpy starts at (0, 0, 0) — the plots show motion
+    # since the alignment instant rather than absolute pose. Mocap goes
+    # through Umeyama first (to absorb its frame's rotation w.r.t. PX4
+    # NED) and is then origin-aligned via the same identity target below.
+    ref_q_wxyz = np.array([1., 0., 0., 0.])
     pos_ekf_rel, q_ekf_rel = align_origin_pose(
         pos_ekf, q_ekf, ref_idx=0, target_q_wxyz=ref_q_wxyz)
-    pos_N_rel,   q_N_rel   = align_origin_pose(
-        pos_N,   q_N,   ref_idx=0, target_q_wxyz=ref_q_wxyz)
+    pos_N_rel = q_N_rel = None
+    if has_replay:
+        pos_N_rel, q_N_rel = align_origin_pose(
+            pos_N, q_N, ref_idx=0, target_q_wxyz=ref_q_wxyz)
 
-    # Build trajectories from the already-aligned arrays — no further
-    # evo align_origin call needed, since both share a common ref pose.
-    traj_ref = make_pose_trajectory(ts_ekf,        pos_ekf_rel, q_ekf_rel)
-    traj_est = make_pose_trajectory(ts_replay_us,  pos_N_rel,   q_N_rel)
-
-    n_replay_before = traj_est.num_poses
-    traj_ref_a, traj_est_a = sync.associate_trajectories(
-        traj_ref, traj_est,
-        max_diff=args.tol,
-        first_name="EKF2 (GT)", snd_name="replay")
-    matched_pct = 100.0 * traj_est_a.num_poses / max(n_replay_before, 1)
-    print(f"\nassociated {traj_est_a.num_poses} / {n_replay_before} replay samples "
-          f"to EKF2 within {args.tol*1000:.0f} ms ({matched_pct:.1f}%)")
-    if matched_pct < 50:
-        print("  fewer than 50% matched — time sync is likely wrong.")
-
-    traj_est_aligned = traj_est_a  # already aligned via the SE(3) step above
-
-    # Common time origin = first EKF2 sample. Time axis is "seconds since
-    # EKF2 start" so EKF2 spans 0..end and replay/VVO sit at their actual
-    # offset (replay/VVO often start much later than EKF2).
+    # Common time origin = first EKF2 sample.
     t0_s = float(ts_ekf[0]) / 1e6
 
     # Full traces (not post-association) for time-series plots.
-    t_ekf_rel    = ts_ekf       / 1e6 - t0_s
-    t_replay_rel = ts_replay_us / 1e6 - t0_s
+    t_ekf_rel    = ts_ekf / 1e6 - t0_s
+    t_replay_rel = (ts_replay_us / 1e6 - t0_s) if has_replay else None
 
     def _euler_deg(q_wxyz):
         q_xyzw = q_wxyz[:, [1, 2, 3, 0]]
@@ -464,13 +757,7 @@ def main():
             Rotation.from_quat(q_xyzw).as_euler("xyz"), axis=0))
 
     eul_ekf_full    = _euler_deg(q_ekf_rel)
-    eul_replay_full = _euler_deg(q_N_rel)
-
-    # Post-association arrays — used only for paired-error metrics
-    # (position error, APE, RPE).
-    p_ref         = traj_ref_a.positions_xyz
-    p_est         = traj_est_aligned.positions_xyz
-    t_paired_rel  = np.asarray(traj_ref_a.timestamps) - t0_s
+    eul_replay_full = _euler_deg(q_N_rel) if has_replay else None
 
     # Optional live VVO overlay (already in PX4 frame & clock).
     t_vvo_rel = None
@@ -481,6 +768,58 @@ def main():
         pos_vvo_rel, q_vvo_rel = align_origin_pose(
             pos_vvo, q_vvo, ref_idx=0, target_q_wxyz=ref_q_wxyz)
         eul_vvo_full = _euler_deg(q_vvo_rel)
+
+    # Optional mocap overlay. Aligned to the chosen sync reference (replay
+    # by default) via Umeyama (rotation + translation, no scale) on the
+    # time-associated subset; the resulting SE(3) is then applied to the
+    # full mocap trace.
+    #
+    # Why trajectory-wide Umeyama, not align_origin_pose at sample 0:
+    # the mocap rigid-body's local frame is Qualisys-defined (set by the
+    # marker pattern) and won't generally match PX4 body frame — a single-
+    # pose attitude alignment leaves a residual yaw that sends the
+    # trajectory in the wrong direction. Umeyama on the trajectory absorbs
+    # that residual yaw plus any small mocap-world → PX4-NED rotation.
+    #
+    # Per-axis body-frame velocity isn't overlaid (same mocap-body frame
+    # mismatch); only |v| (frame-invariant) goes on the Speed panel.
+    t_mocap_rel = pos_mocap_rel = eul_mocap_full = spd_mocap_full = None
+    if ts_mocap_us is not None:
+        from evo.core.lie_algebra import se3
+        align_refs = {
+            "replay": (ts_replay_us, pos_N_rel)    if has_replay         else None,
+            "vvo":    (ts_vvo,       pos_vvo_rel)  if pos_vvo_rel is not None else None,
+            "ekf2":   (ts_ekf,       pos_ekf_rel),
+        }
+        align_pair = align_refs.get(args.mocap_sync_with) or align_refs["ekf2"]
+        align_ts, align_pos = align_pair
+
+        identity_q = np.tile(np.array([1., 0., 0., 0.]), (len(align_ts), 1))
+        traj_moc     = make_pose_trajectory(ts_mocap_us, pos_mocap, q_mocap)
+        traj_ref_moc = make_pose_trajectory(align_ts,    align_pos, identity_q)
+        sa, sb = sync.associate_trajectories(
+            traj_ref_moc, traj_moc, max_diff=args.tol,
+            first_name=args.mocap_sync_with, snd_name="mocap")
+        if sb.num_poses < 3:
+            print(f"  mocap alignment skipped: only {sb.num_poses} paired "
+                  f"poses within {args.tol*1000:.0f} ms — sync likely wrong")
+            r_a = np.eye(3)
+        else:
+            r_a, _, _ = sb.align(sa, correct_scale=False)
+            print(f"  mocap aligned to {args.mocap_sync_with} via Umeyama "
+                  f"({sb.num_poses} paired samples)")
+        # Apply Umeyama R (no translation — discarded so origin-alignment
+        # is the sole source of position offset, matching other traces),
+        # then origin-align via the same identity target used for EKF2/
+        # replay/VVO. Result: mocap starts at (0,0,0) with rpy=(0,0,0).
+        traj_moc = make_pose_trajectory(ts_mocap_us, pos_mocap, q_mocap)
+        traj_moc.transform(se3(r_a, np.zeros(3)))
+        pos_mocap_rel, q_mocap_rel = align_origin_pose(
+            traj_moc.positions_xyz, traj_moc.orientations_quat_wxyz,
+            ref_idx=0, target_q_wxyz=ref_q_wxyz)
+        t_mocap_rel    = ts_mocap_us / 1e6 - t0_s
+        eul_mocap_full = _euler_deg(q_mocap_rel)
+        spd_mocap_full = np.linalg.norm(vel_mocap, axis=1)
 
     # ── plots ──────────────────────────────────────────────────────────────
     pos_labels = ["x [m]", "y [m]", "z [m]"]
@@ -494,80 +833,40 @@ def main():
     # v_body = q_t · (q_WI.inv · v_WI); see src/main.cpp sendOdometry).
     # Re-rotating it would double-transform and produce garbage.
     vel_ekf_body    = vel_to_body_frame(vel_ekf, q_ekf)
-    vel_replay_body = vel_to_body_frame(vel_N,   q_N)
+    vel_replay_body = vel_to_body_frame(vel_N, q_N) if has_replay else None
     vel_vvo_body    = vel_vvo if t_vvo_rel is not None else None
 
-    # Position error — needs paired data (post-association).
-    err      = p_est - p_ref
-    err_norm = np.linalg.norm(err, axis=1)
-    rms      = np.sqrt(np.mean(err**2, axis=0))
-    fig, axs = plt.subplots(4, 1, sharex=True, figsize=(12, 9))
-    for i, (lbl, col) in enumerate(zip(
-            ["ΔX [m]", "ΔY [m]", "ΔZ [m]"],
-            ["steelblue", "darkorange", "forestgreen"])):
-        axs[i].plot(t_paired_rel, err[:, i], color=col, lw=0.8)
-        axs[i].axhline(0, color="black", lw=0.5, ls=":")
-        axs[i].set_ylabel(lbl); axs[i].grid(True, alpha=0.3)
-    axs[3].plot(t_paired_rel, err_norm, color="crimson", lw=0.8)
-    axs[3].set_ylabel("|ΔP| [m]"); axs[3].grid(True, alpha=0.3)
-    axs[0].set_title(
-        f"Position error: replay − EKF2  "
-        f"(RMS: X={rms[0]:.3f}  Y={rms[1]:.3f}  Z={rms[2]:.3f} m)")
-    axs[-1].set_xlabel("t [s] (since EKF2 start)")
-    plt.tight_layout(); handle_fig(fig, "compare_position_error", save_dir)
+    # ── APE / RPE / position error ────────────────────────────────────────
+    # GT preference: mocap when available (true ground truth), otherwise
+    # EKF2 (best available estimate of truth). Every other available trace
+    # is treated as an estimate and evaluated against the GT.
+    sources = {"ekf2": (ts_ekf, pos_ekf_rel, q_ekf_rel)}
+    if has_replay:
+        sources["replay"] = (ts_replay_us, pos_N_rel, q_N_rel)
+    if t_vvo_rel is not None:
+        pos_vvo_rel_full, q_vvo_rel_full = pos_vvo_rel, q_vvo_rel
+        sources["vvo"] = (ts_vvo, pos_vvo_rel_full, q_vvo_rel_full)
+    if t_mocap_rel is not None:
+        sources["mocap"] = (ts_mocap_us, pos_mocap_rel, q_mocap_rel)
 
-    # APE
-    ape = metrics.APE(metrics.PoseRelation.translation_part)
-    ape.process_data((traj_ref_a, traj_est_aligned))
-    ape_stats = ape.get_all_statistics()
-    print("\n── APE (translation) ──")
-    pprint.pprint(ape_stats)
-    fig = plt.figure(figsize=(10, 4))
-    plot.error_array(
-        fig.gca(), ape.error, x_array=t_paired_rel,
-        statistics={s: v for s, v in ape_stats.items() if s != "sse"},
-        name="APE", title="APE w.r.t. translation  (GT = EKF2, est = replay)",
-        xlabel="t [s] (since EKF2 start)")
-    handle_fig(fig, "compare_ape", save_dir)
+    gt_name = "mocap" if "mocap" in sources else "ekf2"
+    ts_gt, pos_gt, q_gt = sources[gt_name]
+    gt_traj = make_pose_trajectory(ts_gt, pos_gt, q_gt)
+    print(f"\nGT for APE/RPE: {gt_name}  ({gt_traj.num_poses} poses)")
+    for est_name, (ts_e, pos_e, q_e) in sources.items():
+        if est_name == gt_name:
+            continue
+        est_traj = make_pose_trajectory(ts_e, pos_e, q_e)
+        evaluate_pair(gt_traj, gt_name, est_traj, est_name,
+                      t0_s, args.tol, save_dir)
 
-    fig = plt.figure(figsize=(8, 8))
-    ax = plot.prepare_axis(fig, plot.PlotMode.xy)
-    plot.traj(ax, plot.PlotMode.xy, traj_ref_a, "--", "gray", "EKF2 (GT)")
-    plot.traj_colormap(ax, traj_est_aligned, ape.error, plot.PlotMode.xy,
-                       title="Replay trajectory coloured by APE",
-                       min_map=ape_stats["min"], max_map=ape_stats["max"])
-    ax.legend()
-    handle_fig(fig, "compare_ape_trajectory", save_dir)
-
-    # RPE — skipped if the GT trajectory is too short to yield any δ-pairs.
-    from evo.core.filters import FilterException
-    traj_length = float(np.sum(np.linalg.norm(np.diff(p_ref, axis=0), axis=1)))
-    rpe_delta   = float(np.clip(traj_length * 0.1, 0.05, 10.0))
-    print(f"\nGT length: {traj_length:.3f} m  →  RPE δ = {rpe_delta:.3f} m")
-    rpe = metrics.RPE(pose_relation=metrics.PoseRelation.translation_part,
-                      delta=rpe_delta, delta_unit=Unit.meters, all_pairs=True)
-    try:
-        rpe.process_data((traj_ref_a, traj_est_aligned))
-        rpe_stats = rpe.get_all_statistics()
-        print(f"\n── RPE (translation, δ={rpe_delta:.3f} m, all_pairs) ──")
-        pprint.pprint(rpe_stats)
-        fig = plt.figure(figsize=(10, 4))
-        plot.error_array(
-            fig.gca(), rpe.error, x_array=np.arange(len(rpe.error)),
-            statistics={s: v for s, v in rpe_stats.items() if s != "sse"},
-            name="RPE", title=f"RPE  δ={rpe_delta:.3f} m, all_pairs",
-            xlabel="pair index")
-        handle_fig(fig, "compare_rpe", save_dir)
-    except FilterException as exc:
-        print(f"  RPE skipped: {exc}")
-
-    # ── overlay plots (drawn twice: with EKF2, then without) ───────────────
-    # EKF2 estimate can be corrupt (poor yaw init etc.); the no-EKF set lets
-    # us inspect replay vs live VVO without that contamination.
-    cov_df  = pd.read_csv(args.replay_dir / "cov_diag.csv")
-    rinn_df = pd.read_csv(args.replay_dir / "radar_innov.csv")
-    binn_df = pd.read_csv(args.replay_dir / "baro_innov.csv")
-    binn_t_rel = binn_df["t"].to_numpy() + offset_us / 1e6 - t0_s
+    cov_df = rinn_df = binn_df = binn_t_rel = None
+    if has_replay:
+        # Replay-only diagnostic CSVs (σ band, radar/baro innovations).
+        cov_df  = pd.read_csv(args.replay_dir / "cov_diag.csv")
+        rinn_df = pd.read_csv(args.replay_dir / "radar_innov.csv")
+        binn_df = pd.read_csv(args.replay_dir / "baro_innov.csv")
+        binn_t_rel = binn_df["t"].to_numpy() + offset_us / 1e6 - t0_s
 
     def render_overlays(out_root: Path, with_ekf: bool, with_vvo: bool = True):
         out_root.mkdir(parents=True, exist_ok=True)
@@ -575,6 +874,9 @@ def main():
         # no VVO data at all (t_vvo_rel is None) or the caller explicitly asks
         # to hide it (with_vvo=False, the "no_vvo" pass).
         show_vvo = with_vvo and (t_vvo_rel is not None)
+        show_mocap = t_mocap_rel is not None
+        show_replay = has_replay
+        MOCAP_KW = dict(color="forestgreen", lw=0.8, alpha=0.85, label="mocap")
         if not with_ekf:
             sfx = "  (no EKF2)"
         elif not with_vvo:
@@ -587,18 +889,24 @@ def main():
         for i in range(3):
             if with_ekf:
                 axs[i, 0].plot(t_ekf_rel, pos_ekf_rel[:, i], label="EKF2 (GT)")
-            axs[i, 0].plot(t_replay_rel, pos_N_rel[:, i], label="replay", alpha=0.85)
+            if show_replay:
+                axs[i, 0].plot(t_replay_rel, pos_N_rel[:, i], label="replay", alpha=0.85)
             if show_vvo:
                 axs[i, 0].plot(t_vvo_rel, pos_vvo_rel[:, i], ":",
                                color="darkorange", alpha=0.7, label="live VVO")
+            if show_mocap:
+                axs[i, 0].plot(t_mocap_rel, pos_mocap_rel[:, i], **MOCAP_KW)
             axs[i, 0].set_ylabel(pos_labels[i]); axs[i, 0].grid(True, alpha=0.3)
 
             if with_ekf:
                 axs[i, 1].plot(t_ekf_rel, eul_ekf_full[:, i], label="EKF2 (GT)")
-            axs[i, 1].plot(t_replay_rel, eul_replay_full[:, i], label="replay", alpha=0.85)
+            if show_replay:
+                axs[i, 1].plot(t_replay_rel, eul_replay_full[:, i], label="replay", alpha=0.85)
             if show_vvo:
                 axs[i, 1].plot(t_vvo_rel, eul_vvo_full[:, i], ":",
                                color="darkorange", alpha=0.7, label="live VVO")
+            if show_mocap:
+                axs[i, 1].plot(t_mocap_rel, eul_mocap_full[:, i], **MOCAP_KW)
             axs[i, 1].set_ylabel(rpy_labels[i]); axs[i, 1].grid(True, alpha=0.3)
 
         axs[0, 0].set_title("Position vs time (per-trace origin-aligned)" + sfx)
@@ -613,11 +921,14 @@ def main():
         if with_ekf:
             ax.plot(pos_ekf_rel[:, 0], pos_ekf_rel[:, 1], "--", color="gray",
                     lw=0.8, label="EKF2 (GT)")
-        ax.plot(pos_N_rel[:, 0], pos_N_rel[:, 1], color="steelblue",
-                lw=0.8, label="replay")
+        if show_replay:
+            ax.plot(pos_N_rel[:, 0], pos_N_rel[:, 1], color="steelblue",
+                    lw=0.8, label="replay")
         if show_vvo:
             ax.plot(pos_vvo_rel[:, 0], pos_vvo_rel[:, 1], ":",
                     color="darkorange", lw=0.8, alpha=0.7, label="live VVO")
+        if show_mocap:
+            ax.plot(pos_mocap_rel[:, 0], pos_mocap_rel[:, 1], **MOCAP_KW)
         ax.set_xlabel("x [m]"); ax.set_ylabel("y [m]")
         ax.set_title("Trajectory XY (per-trace origin-aligned)" + sfx)
         ax.set_aspect("equal")
@@ -629,7 +940,8 @@ def main():
         for i, lbl in enumerate(["vx_body [m/s]", "vy_body [m/s]", "vz_body [m/s]"]):
             if with_ekf:
                 axs[i].plot(t_ekf_rel, vel_ekf_body[:, i], label="EKF2 (GT)")
-            axs[i].plot(t_replay_rel, vel_replay_body[:, i], label="replay", alpha=0.85)
+            if show_replay:
+                axs[i].plot(t_replay_rel, vel_replay_body[:, i], label="replay", alpha=0.85)
             if show_vvo and vel_vvo_body is not None:
                 axs[i].plot(t_vvo_rel, vel_vvo_body[:, i], ":",
                             color="darkorange", alpha=0.7, label="live VVO")
@@ -638,62 +950,86 @@ def main():
         axs[-1].set_xlabel("t [s] (since EKF2 start)")
         plt.tight_layout(); handle_fig(fig, "compare_velocity", out_root)
 
-        # 2×3 overview (mirrors tools/replay/scripts/plot_runs.py).
-        # Top row: EKF2 / replay / live-VVO overlays. Bottom row: replay-only
-        # σ-evolution, radar innovation hist, baro innovation — unchanged
-        # between the two passes.
-        fig, axes = plt.subplots(2, 3, figsize=(17, 10))
+        # Overview grid: 2×3 with replay (top = overlays, bottom = replay-only
+        # diagnostics); 1×3 without replay (top row only).
+        nrows = 2 if has_replay else 1
+        figsize = (17, 10) if has_replay else (17, 5)
+        fig, axes = plt.subplots(nrows, 3, figsize=figsize, squeeze=False)
 
         # [0,0] xy trajectory (top-down)
         ax = axes[0, 0]
         if with_ekf:
             ax.plot(pos_ekf_rel[:, 0], pos_ekf_rel[:, 1], "--", color="gray",
                     lw=0.8, label="EKF2 (GT)")
-        ax.plot(pos_N_rel[:, 0], pos_N_rel[:, 1], color="steelblue",
-                lw=0.8, label="replay")
+        if show_replay:
+            ax.plot(pos_N_rel[:, 0], pos_N_rel[:, 1], color="steelblue",
+                    lw=0.8, label="replay")
         if show_vvo:
             ax.plot(pos_vvo_rel[:, 0], pos_vvo_rel[:, 1], ":",
                     color="darkorange", lw=0.8, alpha=0.8, label="live VVO")
+        if show_mocap:
+            ax.plot(pos_mocap_rel[:, 0], pos_mocap_rel[:, 1], **MOCAP_KW)
         ax.set_xlabel("p_x [m]"); ax.set_ylabel("p_y [m]")
         ax.set_title("Trajectory (top-down)")
         ax.set_aspect("equal", adjustable="datalim")
         ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
-        # [0,1] altitude vs t (with replay ±σ_z band)
+        # [0,1] altitude vs t (with replay ±σ_z band when available)
         ax = axes[0, 1]
-        sig_z = np.sqrt(np.clip(cov_df["P02"].to_numpy(), 0, None))
-        pz_replay = pos_N_rel[:, 2]
-        n = min(len(pz_replay), len(sig_z), len(t_replay_rel))
-        ax.fill_between(t_replay_rel[:n], pz_replay[:n] - sig_z[:n],
-                        pz_replay[:n] + sig_z[:n], color="steelblue", alpha=0.15)
+        if show_replay:
+            sig_z = np.sqrt(np.clip(cov_df["P02"].to_numpy(), 0, None))
+            pz_replay = pos_N_rel[:, 2]
+            n = min(len(pz_replay), len(sig_z), len(t_replay_rel))
+            ax.fill_between(t_replay_rel[:n], pz_replay[:n] - sig_z[:n],
+                            pz_replay[:n] + sig_z[:n], color="steelblue", alpha=0.15)
         if with_ekf:
             ax.plot(t_ekf_rel, pos_ekf_rel[:, 2], "--", color="gray",
                     lw=0.8, label="EKF2 (GT)")
-        ax.plot(t_replay_rel, pz_replay, color="steelblue",
-                lw=0.6, label="replay (±σ_z)")
+        if show_replay:
+            ax.plot(t_replay_rel, pz_replay, color="steelblue",
+                    lw=0.6, label="replay (±σ_z)")
         if show_vvo:
             ax.plot(t_vvo_rel, pos_vvo_rel[:, 2], ":", color="darkorange",
                     lw=0.8, alpha=0.8, label="live VVO")
+        if show_mocap:
+            ax.plot(t_mocap_rel, pos_mocap_rel[:, 2], **MOCAP_KW)
         ax.set_xlabel("t [s]"); ax.set_ylabel("p_z [m]")
         ax.set_title("Altitude")
         ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
         # [0,2] speed |v|
         ax = axes[0, 2]
-        spd_replay = np.linalg.norm(vel_N, axis=1)
         if with_ekf:
             spd_ekf = np.linalg.norm(vel_ekf, axis=1)
             ax.plot(t_ekf_rel, spd_ekf, "--", color="gray",
                     lw=0.8, label="EKF2 (GT)")
-        ax.plot(t_replay_rel, spd_replay, color="steelblue",
-                lw=0.6, label="replay")
+        if show_replay:
+            spd_replay = np.linalg.norm(vel_N, axis=1)
+            ax.plot(t_replay_rel, spd_replay, color="steelblue",
+                    lw=0.6, label="replay")
         if show_vvo:
             spd_vvo = np.linalg.norm(vel_vvo, axis=1)
             ax.plot(t_vvo_rel, spd_vvo, ":", color="darkorange",
                     lw=0.8, alpha=0.8, label="live VVO")
+        if show_mocap:
+            ax.plot(t_mocap_rel, spd_mocap_full, **MOCAP_KW)
         ax.set_xlabel("t [s]"); ax.set_ylabel("|v| [m/s]")
         ax.set_title("Speed")
         ax.grid(alpha=0.3); ax.legend(fontsize=8)
+
+        if not has_replay:
+            goto_bottom_row = False
+        else:
+            goto_bottom_row = True
+        if not goto_bottom_row:
+            fig.suptitle(f"compare overview — {args.replay_dir.name}  "
+                         "(no replay)")
+            fig.tight_layout()
+            out = Path(out_root) / "compare.png"
+            fig.savefig(out, dpi=120, bbox_inches="tight")
+            plt.close(fig)
+            print(f"  saved → {out}")
+            return
 
         # [1,0] accepted vs rejected radar points per frame — stacked bar.
         # One bar per radar frame, total height = points in that frame,

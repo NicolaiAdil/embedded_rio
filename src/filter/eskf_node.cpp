@@ -21,8 +21,8 @@ rio::Params makeParams() {
 
   p.g_W = rio::Vec3(0.0f, 0.0f, -9.80665f);
 
-  p.sigma_acc = 2.2563e-3f;
-  p.sigma_ba  = 2.2563e-4f;
+  p.sigma_acc = 1.86e-3f;
+  p.sigma_ba  = 1.86e-4f;
 
   p.sigma_gyr = 2.443461e-4f;
   p.sigma_bg  = 2.443461e-5f;
