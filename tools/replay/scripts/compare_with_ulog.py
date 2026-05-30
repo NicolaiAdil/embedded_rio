@@ -403,10 +403,8 @@ def evaluate_pair(gt_traj, gt_name, est_traj, est_name, t0_s, tol, save_dir):
     ax.legend()
     handle_fig(fig, f"compare_ape_trajectory_{est_name}", save_dir)
 
-    # RPE
-    traj_length = float(np.sum(np.linalg.norm(np.diff(p_ref, axis=0), axis=1)))
-    rpe_delta   = float(np.clip(traj_length * 0.1, 0.05, 10.0))
-    print(f"GT length: {traj_length:.3f} m  →  RPE δ = {rpe_delta:.3f} m")
+    # RPE — fixed δ = 10 m so results are directly comparable across runs.
+    rpe_delta = 10.0
     rpe = metrics.RPE(pose_relation=metrics.PoseRelation.translation_part,
                       delta=rpe_delta, delta_unit=Unit.meters, all_pairs=True)
     try:
@@ -617,6 +615,60 @@ def main():
               f"{t_replay_s[-1]-t_replay_s[0]:.2f}s   "
               f"first PX4-aligned t = {ts_replay_us[0]/1e6:.3f}s "
               f"(EKF2 first = {ts_ekf[0]/1e6:.3f}s)")
+
+        # Refine VVO timestamps via |v| cross-correlation against replay.
+        # The Teensy→PX4 anchor above is a single-event match (first RAD
+        # publish → first VVO entry), which doesn't account for MAVLink
+        # transit delay between Teensy generation time and PX4 receive
+        # time. Cross-correlating the velocity magnitudes recovers the
+        # full-trajectory best-fit lag (a few ms in typical setups).
+        spd_rep_us = np.linalg.norm(vel_N,   axis=1)
+        spd_vvo_us = np.linalg.norm(vel_vvo, axis=1)
+        t_lo = max(ts_replay_us[0], ts_vvo[0]) / 1e6
+        t_hi = min(ts_replay_us[-1], ts_vvo[-1]) / 1e6
+        if t_hi > t_lo:
+            dt   = 0.005   # 200 Hz — enough to resolve a few-ms shift
+            grid = np.arange(t_lo, t_hi + dt, dt)
+            s_r  = np.interp(grid, ts_replay_us/1e6, spd_rep_us)
+            s_v  = np.interp(grid, ts_vvo/1e6,       spd_vvo_us)
+            s_r  = (s_r - s_r.mean()) / (s_r.std() + 1e-12)
+            s_v  = (s_v - s_v.mean()) / (s_v.std() + 1e-12)
+            corr = correlate(s_r, s_v, mode="full")
+            lags = correlation_lags(len(s_r), len(s_v), mode="full")
+            best_lag = int(lags[int(np.argmax(corr))])
+            vvo_shift_s = float(best_lag) * dt
+            print(f"\n|v| refinement (VVO vs replay): VVO shift = "
+                  f"{vvo_shift_s*1000:+.1f} ms   "
+                  f"(peak lag = {best_lag} samples @ {1/dt:.0f} Hz)")
+
+            # Diagnostic plot: |v| before vs after shift.
+            t0 = ts_replay_us[0] / 1e6
+            fig, axs = plt.subplots(2, 1, sharex=True, figsize=(12, 6))
+            axs[0].plot(ts_replay_us/1e6 - t0, spd_rep_us,
+                        color="steelblue",  lw=0.8, label="replay |v|")
+            axs[0].plot(ts_vvo/1e6 - t0,       spd_vvo_us,
+                        color="darkorange", lw=0.8, label="live VVO |v|")
+            axs[0].set_title("Before VVO refinement")
+            axs[0].set_ylabel("|v| [m/s]")
+            axs[0].grid(alpha=0.3); axs[0].legend(fontsize=8)
+            axs[1].plot(ts_replay_us/1e6 - t0, spd_rep_us,
+                        color="steelblue",  lw=0.8, label="replay |v|")
+            axs[1].plot(ts_vvo/1e6 - t0 + vvo_shift_s, spd_vvo_us,
+                        color="darkorange", lw=0.8,
+                        label=f"live VVO |v|  (shifted {vvo_shift_s*1000:+.1f} ms)")
+            axs[1].set_title("After VVO refinement")
+            axs[1].set_xlabel("t [s] (replay-relative)")
+            axs[1].set_ylabel("|v| [m/s]")
+            axs[1].grid(alpha=0.3); axs[1].legend(fontsize=8)
+            fig.tight_layout()
+            out = Path(save_dir) / "vvo_velocity_sync.svg"
+            fig.savefig(out, bbox_inches="tight"); plt.close(fig)
+            print(f"  saved → {out}")
+
+            # Apply the shift to VVO timestamps so all downstream code
+            # (mocap sync, trimming, overlays, APE/RPE) sees the refined
+            # VVO clock.
+            ts_vvo = ts_vvo + vvo_shift_s * 1e6
 
     # ── optional mocap bag ─────────────────────────────────────────────────
     # Loaded BEFORE trimming so the full mocap trajectory is available for
