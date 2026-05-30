@@ -531,12 +531,12 @@ def main():
                          "for the auto time-sync (default: replay). Ignored "
                          "when --mocap-offset is given.")
     ap.add_argument("--mocap-body-frame", choices=("frd", "bld"),
-                    default="bld",
-                    help="Mocap rigid-body frame convention (default: bld). "
-                         "'bld' applies a 180°-about-Z body rotation to "
-                         "convert Back-Left-Down → Forward-Right-Down so "
-                         "body-frame velocity/attitude match VVO. Use 'frd' "
-                         "for bags whose rigid body is set up correctly.")
+                    default="frd",
+                    help="Mocap rigid-body frame convention (default: frd). "
+                         "Use 'bld' for bags whose rigid body was set up "
+                         "Back-Left-Down: a 180°-about-Z body rotation is "
+                         "applied to convert Back-Left-Down → Forward-Right-"
+                         "Down so body-frame velocity/attitude match VVO.")
     args = ap.parse_args()
 
     if not args.replay_dir.is_dir():

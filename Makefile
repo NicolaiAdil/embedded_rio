@@ -114,4 +114,4 @@ help:
 	@echo "    MOCAP=path/to.bag    → adds --mocap (overlay ROS1 mocap bag)"
 	@echo "    MOCAP_OFFSET=1.23    → adds --mocap-offset 1.23  (override |v|-autosync, s)"
 	@echo "    MOCAP_SYNC=vvo       → adds --mocap-sync-with vvo  (replay|vvo|ekf2; default replay)"
-	@echo "    MOCAP_FRAME=frd      → adds --mocap-body-frame frd  (default bld: applies BLD→FRD body fix)"
+	@echo "    MOCAP_FRAME=bld      → adds --mocap-body-frame bld  (default frd; bld applies BLD→FRD body fix)"
