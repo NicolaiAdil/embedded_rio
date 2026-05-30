@@ -440,8 +440,12 @@ def render_raw_sources(out_dir, ts_ekf, pos_ekf, q_ekf, vel_ekf,
 
     def _euler_deg(q_wxyz):
         q_xyzw = q_wxyz[:, [1, 2, 3, 0]]
-        return np.rad2deg(np.unwrap(
+        eul = np.rad2deg(np.unwrap(
             Rotation.from_quat(q_xyzw).as_euler("xyz"), axis=0))
+        # Unwrap keeps roll/pitch continuous, but yaw can spin through
+        # many revolutions and clutter the plot. Re-wrap yaw to (-180,180].
+        eul[:, 2] = ((eul[:, 2] + 180.0) % 360.0) - 180.0
+        return eul
 
     def _one(tag, t_s, pos, q, vel, pos_frame, vel_frame):
         eul = _euler_deg(q)
@@ -753,8 +757,12 @@ def main():
 
     def _euler_deg(q_wxyz):
         q_xyzw = q_wxyz[:, [1, 2, 3, 0]]
-        return np.rad2deg(np.unwrap(
+        eul = np.rad2deg(np.unwrap(
             Rotation.from_quat(q_xyzw).as_euler("xyz"), axis=0))
+        # Unwrap keeps roll/pitch continuous, but yaw can spin through
+        # many revolutions and clutter the plot. Re-wrap yaw to (-180,180].
+        eul[:, 2] = ((eul[:, 2] + 180.0) % 360.0) - 180.0
+        return eul
 
     eul_ekf_full    = _euler_deg(q_ekf_rel)
     eul_replay_full = _euler_deg(q_N_rel) if has_replay else None
