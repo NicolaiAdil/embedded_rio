@@ -10,11 +10,15 @@ Usage:
     python tools/replay/scripts/plot_runs.py runs/baseline --save
 """
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+import plot_style
+from plot_style import ABLATION_COLORS, plot_extrinsic_convergence
 
 
 def quat_to_euler_zyx(q_w, q_x, q_y, q_z):
@@ -33,7 +37,17 @@ def load_run(d: Path):
     binn = pd.read_csv(d / "baro_innov.csv")
     # state.csv and cov_diag.csv emit one row per filter step in lockstep.
     assert len(state) == len(cov), f"row count mismatch in {d}"
-    return {"name": d.name, "state": state, "cov": cov, "rinn": rinn, "binn": binn}
+    # Prefer a human label from config.json (written by run_ablation.sh) so
+    # ablation runs read as "baro+UW" etc. rather than the raw dir name.
+    name = d.name
+    cfg = d / "config.json"
+    if cfg.is_file():
+        try:
+            name = json.loads(cfg.read_text()).get("label", name)
+        except (ValueError, OSError):
+            pass
+    return {"name": name, "dir": d, "state": state, "cov": cov,
+            "rinn": rinn, "binn": binn}
 
 
 def plot_trajectory_xy(ax, runs, colors):
@@ -139,13 +153,14 @@ def main():
                     help="save PNG instead of opening a window")
     args = ap.parse_args()
 
+    plot_style.setup_mpl()
+
     for d in args.dirs:
         if not d.is_dir():
             raise SystemExit(f"not a directory: {d}")
 
     runs = [load_run(d) for d in args.dirs]
-    cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-    colors = [cycle[i % len(cycle)] for i in range(len(runs))]
+    colors = [ABLATION_COLORS[i % len(ABLATION_COLORS)] for i in range(len(runs))]
 
     fig, axes = plt.subplots(2, 3, figsize=(17, 10))
     plot_trajectory_xy   (axes[0, 0], runs, colors)
@@ -157,10 +172,17 @@ def main():
     fig.suptitle("rio_replay — " + "  vs  ".join(r["name"] for r in runs))
     fig.tight_layout()
 
+    # Radar extrinsic convergence (p_IR / q_IR + ±σ) for the same run set.
+    fig_ext = plot_extrinsic_convergence(
+        [r["dir"] for r in runs], labels=[r["name"] for r in runs],
+        colors=colors, bands="first" if len(runs) > 1 else "all")
+
     if args.save:
         out = args.dirs[0] / "compare.png"
         fig.savefig(out, dpi=120)
-        print(f"wrote {out}")
+        out_ext = args.dirs[0] / "compare_extrinsics.png"
+        fig_ext.savefig(out_ext, dpi=120)
+        print(f"wrote {out}\nwrote {out_ext}")
     else:
         plt.show()
 

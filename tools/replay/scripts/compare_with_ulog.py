@@ -58,6 +58,11 @@ from evo.core import sync, metrics
 from evo.core.units import Unit
 from evo.core.trajectory import PoseTrajectory3D
 
+import plot_style
+from plot_style import (BLUE, ORANGE, GREEN, RED, GREY, GT_LS,
+                        AXIS_COLORS, NORM_COLOR,
+                        role_styles, band, plot_extrinsic_convergence)
+
 
 # ── ulog helpers (lifted verbatim from /home/nicolai/ntnu/master/ulogs/plotter.py)
 
@@ -319,12 +324,12 @@ def auto_align_mocap_via_velocity(ts_mocap_s, vel_mocap,
 
     Path(save_dir).mkdir(parents=True, exist_ok=True)
     fig, axs = plt.subplots(2, 1, sharex=True, figsize=(12, 6))
-    axs[0].plot(t_ref_rel,   spd_ref,   color="steelblue",  lw=0.8, label=f"{ref_name} |v|")
-    axs[0].plot(t_mocap_rel, spd_mocap, color="darkorange", lw=0.8, label="mocap |v|")
+    axs[0].plot(t_ref_rel,   spd_ref,   color=BLUE,  lw=0.8, label=f"{ref_name} |v|")
+    axs[0].plot(t_mocap_rel, spd_mocap, color=ORANGE, lw=0.8, label="mocap |v|")
     axs[0].set_title("Before alignment (each trace from its own t=0)")
     axs[0].set_ylabel("|v| [m/s]"); axs[0].grid(alpha=0.3); axs[0].legend(fontsize=8)
-    axs[1].plot(t_ref_rel,             spd_ref,   color="steelblue", lw=0.8, label=f"{ref_name} |v|")
-    axs[1].plot(t_mocap_rel + offset_s, spd_mocap, color="darkorange", lw=0.8,
+    axs[1].plot(t_ref_rel,             spd_ref,   color=BLUE, lw=0.8, label=f"{ref_name} |v|")
+    axs[1].plot(t_mocap_rel + offset_s, spd_mocap, color=ORANGE, lw=0.8,
                 label=f"mocap |v|  (shifted {offset_s:+.3f} s)")
     axs[1].set_title("After alignment")
     axs[1].set_ylabel("|v| [m/s]"); axs[1].set_xlabel(f"t [s] ({ref_name}-relative)")
@@ -366,12 +371,11 @@ def evaluate_pair(gt_traj, gt_name, est_traj, est_name, t0_s, tol, save_dir):
     rms      = np.sqrt(np.mean(err**2, axis=0))
     fig, axs = plt.subplots(4, 1, sharex=True, figsize=(12, 9))
     for i, (lbl, col) in enumerate(zip(
-            ["ΔX [m]", "ΔY [m]", "ΔZ [m]"],
-            ["steelblue", "darkorange", "forestgreen"])):
+            ["ΔX [m]", "ΔY [m]", "ΔZ [m]"], AXIS_COLORS)):
         axs[i].plot(t_paired_rel, err[:, i], color=col, lw=0.8)
         axs[i].axhline(0, color="black", lw=0.5, ls=":")
         axs[i].set_ylabel(lbl); axs[i].grid(True, alpha=0.3)
-    axs[3].plot(t_paired_rel, err_norm, color="crimson", lw=0.8)
+    axs[3].plot(t_paired_rel, err_norm, color=NORM_COLOR, lw=0.8)
     axs[3].set_ylabel("|ΔP| [m]"); axs[3].grid(True, alpha=0.3)
     axs[0].set_title(
         f"Position error: {est_name} − {gt_name}  "
@@ -396,7 +400,7 @@ def evaluate_pair(gt_traj, gt_name, est_traj, est_name, t0_s, tol, save_dir):
 
     fig = plt.figure(figsize=(8, 8))
     ax = plot.prepare_axis(fig, plot.PlotMode.xy)
-    plot.traj(ax, plot.PlotMode.xy, a_gt, "--", "gray", f"{gt_name} (GT)")
+    plot.traj(ax, plot.PlotMode.xy, a_gt, GT_LS, GREY, f"{gt_name} (GT)")
     plot.traj_colormap(ax, a_est, ape.error, plot.PlotMode.xy,
                        title=f"{est_name} trajectory coloured by APE",
                        min_map=ape_stats["min"], max_map=ape_stats["max"])
@@ -464,9 +468,9 @@ def render_raw_sources(out_dir, ts_ekf, pos_ekf, q_ekf, vel_ekf,
         axs[1, 0].set_xlabel("t [s] (since first sample)")
         axs[1, 0].set_ylabel(f"velocity [m/s]  ({vel_frame})")
         axs[1, 0].grid(alpha=0.3); axs[1, 0].legend(fontsize=8)
-        axs[1, 1].plot(pos[:, 0], pos[:, 1], lw=0.6, color="steelblue")
-        axs[1, 1].scatter(pos[0, 0],  pos[0, 1],  c="green", s=25, zorder=3, label="start")
-        axs[1, 1].scatter(pos[-1, 0], pos[-1, 1], c="red",   s=25, zorder=3, label="end")
+        axs[1, 1].plot(pos[:, 0], pos[:, 1], lw=0.6, color=BLUE)
+        axs[1, 1].scatter(pos[0, 0],  pos[0, 1],  c=GREEN, s=25, zorder=3, label="start")
+        axs[1, 1].scatter(pos[-1, 0], pos[-1, 1], c=RED,   s=25, zorder=3, label="end")
         axs[1, 1].set_xlabel("x [m]"); axs[1, 1].set_ylabel("y [m]")
         axs[1, 1].set_title(f"XY trajectory  ({pos_frame})")
         axs[1, 1].set_aspect("equal", adjustable="datalim")
@@ -518,6 +522,15 @@ def main():
                          "publish before aligning/plotting (default 0). The "
                          "first samples can be noisy (filter still settling) "
                          "and contaminate the origin alignment.")
+    ap.add_argument("--align-to-ekf2", dest="align_to_ekf2",
+                    action="store_true",
+                    help="Origin-align every trace to EKF2's attitude at the "
+                         "anchor instead of zeroing each to identity. EKF2 "
+                         "then stays in native NED (pure translation) and "
+                         "replay/VVO/mocap are rotated to land on EKF2's pose. "
+                         "Note: this rotates the whole figure; the relative "
+                         "angle between traces is unchanged (use a Umeyama "
+                         "fit to absorb a constant trajectory rotation).")
     ap.add_argument("--mocap", type=Path, default=None,
                     help="Optional ROS1 bag with mocap odometry to overlay "
                          "on the plots (no APE/RPE computed against mocap).")
@@ -540,6 +553,8 @@ def main():
                          "applied to convert Back-Left-Down → Forward-Right-"
                          "Down so body-frame velocity/attitude match VVO.")
     args = ap.parse_args()
+
+    plot_style.setup_mpl()
 
     if not args.replay_dir.is_dir():
         raise SystemExit(f"not a directory: {args.replay_dir}")
@@ -645,16 +660,16 @@ def main():
             t0 = ts_replay_us[0] / 1e6
             fig, axs = plt.subplots(2, 1, sharex=True, figsize=(12, 6))
             axs[0].plot(ts_replay_us/1e6 - t0, spd_rep_us,
-                        color="steelblue",  lw=0.8, label="replay |v|")
+                        color=BLUE,  lw=0.8, label="replay |v|")
             axs[0].plot(ts_vvo/1e6 - t0,       spd_vvo_us,
-                        color="darkorange", lw=0.8, label="live VVO |v|")
+                        color=GREEN, lw=0.8, label="live VVO |v|")
             axs[0].set_title("Before VVO refinement")
             axs[0].set_ylabel("|v| [m/s]")
             axs[0].grid(alpha=0.3); axs[0].legend(fontsize=8)
             axs[1].plot(ts_replay_us/1e6 - t0, spd_rep_us,
-                        color="steelblue",  lw=0.8, label="replay |v|")
+                        color=BLUE,  lw=0.8, label="replay |v|")
             axs[1].plot(ts_vvo/1e6 - t0 + vvo_shift_s, spd_vvo_us,
-                        color="darkorange", lw=0.8,
+                        color=GREEN, lw=0.8,
                         label=f"live VVO |v|  (shifted {vvo_shift_s*1000:+.1f} ms)")
             axs[1].set_title("After VVO refinement")
             axs[1].set_xlabel("t [s] (replay-relative)")
@@ -792,7 +807,12 @@ def main():
     # since the alignment instant rather than absolute pose. Mocap goes
     # through Umeyama first (to absorb its frame's rotation w.r.t. PX4
     # NED) and is then origin-aligned via the same identity target below.
-    ref_q_wxyz = np.array([1., 0., 0., 0.])
+    if args.align_to_ekf2:
+        ref_q_wxyz = q_ekf[0].copy()
+        print("align target: EKF2 attitude at anchor "
+              "(EKF2 native NED; replay/VVO/mocap rotated onto it)")
+    else:
+        ref_q_wxyz = np.array([1., 0., 0., 0.])
     pos_ekf_rel, q_ekf_rel = align_origin_pose(
         pos_ekf, q_ekf, ref_idx=0, target_q_wxyz=ref_q_wxyz)
     pos_N_rel = q_N_rel = None
@@ -910,6 +930,9 @@ def main():
         sources["mocap"] = (ts_mocap_us, pos_mocap_rel, q_mocap_rel)
 
     gt_name = "mocap" if "mocap" in sources else "ekf2"
+    # Per-trace plot styles (grey-dotted GT = mocap if present else EKF2;
+    # replay=blue, EKF2=orange, VVO=green). Shared by every overlay below.
+    styles = role_styles(sources.keys(), gt_name)
     ts_gt, pos_gt, q_gt = sources[gt_name]
     gt_traj = make_pose_trajectory(ts_gt, pos_gt, q_gt)
     print(f"\nGT for APE/RPE: {gt_name}  ({gt_traj.num_poses} poses)")
@@ -928,7 +951,8 @@ def main():
         binn_df = pd.read_csv(args.replay_dir / "baro_innov.csv")
         binn_t_rel = binn_df["t"].to_numpy() + offset_us / 1e6 - t0_s
 
-    def render_overlays(out_root: Path, with_ekf: bool, with_vvo: bool = True):
+    def render_overlays(out_root: Path, with_ekf: bool, with_vvo: bool = True,
+                        ref_est_labels: bool = False):
         out_root.mkdir(parents=True, exist_ok=True)
         # Local "show VVO?" predicate — short-circuits when either the run had
         # no VVO data at all (t_vvo_rel is None) or the caller explicitly asks
@@ -936,41 +960,61 @@ def main():
         show_vvo = with_vvo and (t_vvo_rel is not None)
         show_mocap = t_mocap_rel is not None
         show_replay = has_replay
-        MOCAP_KW = dict(color="forestgreen", lw=0.8, alpha=0.85, label="mocap")
-        if not with_ekf:
+        # Style kwargs per trace (grey-dotted GT, blue replay, orange EKF2,
+        # green VVO) from the shared convention in plot_style.
+        ekf_kw = styles["ekf2"]
+        rep_kw = styles.get("replay")
+        vvo_kw = styles.get("vvo")
+        moc_kw = styles.get("mocap")
+        # Replay-vs-GT folder: use the generic thesis legend — the estimate
+        # (replay) and the reference (whichever trace is the GT). Copy the
+        # dicts so the shared `styles` used by the other passes is untouched.
+        if ref_est_labels:
+            if rep_kw is not None:
+                rep_kw = {**rep_kw, "label": "estimate"}
+            ref_label = f"reference ({gt_name.upper()})"
+            if gt_name == "ekf2":
+                ekf_kw = {**ekf_kw, "label": ref_label}
+            elif gt_name == "mocap" and moc_kw is not None:
+                moc_kw = {**moc_kw, "label": ref_label}
+        if not with_ekf and not with_vvo:
+            sfx = f"  (replay vs {gt_name})"
+        elif not with_ekf:
             sfx = "  (no EKF2)"
         elif not with_vvo:
             sfx = "  (no live VVO)"
         else:
             sfx = ""
 
+        def _title(ax, text):
+            """Per-axes title — suppressed in the clean replay-vs-GT folder."""
+            ax.set_title("" if ref_est_labels else text)
+
         # Pose vs time — full traces, starting at their actual time offsets.
         fig, axs = plt.subplots(3, 2, sharex="col", figsize=(12, 8))
         for i in range(3):
             if with_ekf:
-                axs[i, 0].plot(t_ekf_rel, pos_ekf_rel[:, i], label="EKF2 (GT)")
+                axs[i, 0].plot(t_ekf_rel, pos_ekf_rel[:, i], **ekf_kw)
             if show_replay:
-                axs[i, 0].plot(t_replay_rel, pos_N_rel[:, i], label="replay", alpha=0.85)
+                axs[i, 0].plot(t_replay_rel, pos_N_rel[:, i], **rep_kw)
             if show_vvo:
-                axs[i, 0].plot(t_vvo_rel, pos_vvo_rel[:, i], ":",
-                               color="darkorange", alpha=0.7, label="live VVO")
+                axs[i, 0].plot(t_vvo_rel, pos_vvo_rel[:, i], **vvo_kw)
             if show_mocap:
-                axs[i, 0].plot(t_mocap_rel, pos_mocap_rel[:, i], **MOCAP_KW)
+                axs[i, 0].plot(t_mocap_rel, pos_mocap_rel[:, i], **moc_kw)
             axs[i, 0].set_ylabel(pos_labels[i]); axs[i, 0].grid(True, alpha=0.3)
 
             if with_ekf:
-                axs[i, 1].plot(t_ekf_rel, eul_ekf_full[:, i], label="EKF2 (GT)")
+                axs[i, 1].plot(t_ekf_rel, eul_ekf_full[:, i], **ekf_kw)
             if show_replay:
-                axs[i, 1].plot(t_replay_rel, eul_replay_full[:, i], label="replay", alpha=0.85)
+                axs[i, 1].plot(t_replay_rel, eul_replay_full[:, i], **rep_kw)
             if show_vvo:
-                axs[i, 1].plot(t_vvo_rel, eul_vvo_full[:, i], ":",
-                               color="darkorange", alpha=0.7, label="live VVO")
+                axs[i, 1].plot(t_vvo_rel, eul_vvo_full[:, i], **vvo_kw)
             if show_mocap:
-                axs[i, 1].plot(t_mocap_rel, eul_mocap_full[:, i], **MOCAP_KW)
+                axs[i, 1].plot(t_mocap_rel, eul_mocap_full[:, i], **moc_kw)
             axs[i, 1].set_ylabel(rpy_labels[i]); axs[i, 1].grid(True, alpha=0.3)
 
-        axs[0, 0].set_title("Position vs time (per-trace origin-aligned)" + sfx)
-        axs[0, 1].set_title("Attitude vs time" + sfx)
+        _title(axs[0, 0], "Position vs time (per-trace origin-aligned)" + sfx)
+        _title(axs[0, 1], "Attitude vs time" + sfx)
         axs[0, 0].legend(fontsize=8); axs[0, 1].legend(fontsize=8)
         axs[-1, 0].set_xlabel("t [s] (since EKF2 start)")
         axs[-1, 1].set_xlabel("t [s] (since EKF2 start)")
@@ -979,18 +1023,15 @@ def main():
         # XY trajectory overlay — per-trace origin-aligned, no time axis.
         fig, ax = plt.subplots(figsize=(8, 8))
         if with_ekf:
-            ax.plot(pos_ekf_rel[:, 0], pos_ekf_rel[:, 1], "--", color="gray",
-                    lw=0.8, label="EKF2 (GT)")
+            ax.plot(pos_ekf_rel[:, 0], pos_ekf_rel[:, 1], **ekf_kw)
         if show_replay:
-            ax.plot(pos_N_rel[:, 0], pos_N_rel[:, 1], color="steelblue",
-                    lw=0.8, label="replay")
+            ax.plot(pos_N_rel[:, 0], pos_N_rel[:, 1], **rep_kw)
         if show_vvo:
-            ax.plot(pos_vvo_rel[:, 0], pos_vvo_rel[:, 1], ":",
-                    color="darkorange", lw=0.8, alpha=0.7, label="live VVO")
+            ax.plot(pos_vvo_rel[:, 0], pos_vvo_rel[:, 1], **vvo_kw)
         if show_mocap:
-            ax.plot(pos_mocap_rel[:, 0], pos_mocap_rel[:, 1], **MOCAP_KW)
+            ax.plot(pos_mocap_rel[:, 0], pos_mocap_rel[:, 1], **moc_kw)
         ax.set_xlabel("x [m]"); ax.set_ylabel("y [m]")
-        ax.set_title("Trajectory XY (per-trace origin-aligned)" + sfx)
+        _title(ax, "Trajectory XY (per-trace origin-aligned)" + sfx)
         ax.set_aspect("equal")
         ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
         plt.tight_layout(); handle_fig(fig, "compare_trajectory_xy", out_root)
@@ -999,14 +1040,13 @@ def main():
         fig, axs = plt.subplots(3, 1, sharex=True, figsize=(12, 7))
         for i, lbl in enumerate(["vx_body [m/s]", "vy_body [m/s]", "vz_body [m/s]"]):
             if with_ekf:
-                axs[i].plot(t_ekf_rel, vel_ekf_body[:, i], label="EKF2 (GT)")
+                axs[i].plot(t_ekf_rel, vel_ekf_body[:, i], **ekf_kw)
             if show_replay:
-                axs[i].plot(t_replay_rel, vel_replay_body[:, i], label="replay", alpha=0.85)
+                axs[i].plot(t_replay_rel, vel_replay_body[:, i], **rep_kw)
             if show_vvo and vel_vvo_body is not None:
-                axs[i].plot(t_vvo_rel, vel_vvo_body[:, i], ":",
-                            color="darkorange", alpha=0.7, label="live VVO")
+                axs[i].plot(t_vvo_rel, vel_vvo_body[:, i], **vvo_kw)
             axs[i].set_ylabel(lbl); axs[i].grid(True, alpha=0.3); axs[i].legend(fontsize=8)
-        axs[0].set_title("Velocity vs time (body frame)" + sfx)
+        _title(axs[0], "Velocity vs time (body frame)" + sfx)
         axs[-1].set_xlabel("t [s] (since EKF2 start)")
         plt.tight_layout(); handle_fig(fig, "compare_velocity", out_root)
 
@@ -1019,18 +1059,15 @@ def main():
         # [0,0] xy trajectory (top-down)
         ax = axes[0, 0]
         if with_ekf:
-            ax.plot(pos_ekf_rel[:, 0], pos_ekf_rel[:, 1], "--", color="gray",
-                    lw=0.8, label="EKF2 (GT)")
+            ax.plot(pos_ekf_rel[:, 0], pos_ekf_rel[:, 1], **ekf_kw)
         if show_replay:
-            ax.plot(pos_N_rel[:, 0], pos_N_rel[:, 1], color="steelblue",
-                    lw=0.8, label="replay")
+            ax.plot(pos_N_rel[:, 0], pos_N_rel[:, 1], **rep_kw)
         if show_vvo:
-            ax.plot(pos_vvo_rel[:, 0], pos_vvo_rel[:, 1], ":",
-                    color="darkorange", lw=0.8, alpha=0.8, label="live VVO")
+            ax.plot(pos_vvo_rel[:, 0], pos_vvo_rel[:, 1], **vvo_kw)
         if show_mocap:
-            ax.plot(pos_mocap_rel[:, 0], pos_mocap_rel[:, 1], **MOCAP_KW)
+            ax.plot(pos_mocap_rel[:, 0], pos_mocap_rel[:, 1], **moc_kw)
         ax.set_xlabel("p_x [m]"); ax.set_ylabel("p_y [m]")
-        ax.set_title("Trajectory (top-down)")
+        _title(ax, "Trajectory (top-down)")
         ax.set_aspect("equal", adjustable="datalim")
         ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
@@ -1041,40 +1078,36 @@ def main():
             pz_replay = pos_N_rel[:, 2]
             n = min(len(pz_replay), len(sig_z), len(t_replay_rel))
             ax.fill_between(t_replay_rel[:n], pz_replay[:n] - sig_z[:n],
-                            pz_replay[:n] + sig_z[:n], color="steelblue", alpha=0.15)
+                            pz_replay[:n] + sig_z[:n], **band(rep_kw))
         if with_ekf:
-            ax.plot(t_ekf_rel, pos_ekf_rel[:, 2], "--", color="gray",
-                    lw=0.8, label="EKF2 (GT)")
+            ax.plot(t_ekf_rel, pos_ekf_rel[:, 2], **ekf_kw)
         if show_replay:
-            ax.plot(t_replay_rel, pz_replay, color="steelblue",
-                    lw=0.6, label="replay (±σ_z)")
+            ax.plot(t_replay_rel, pz_replay,
+                    **{**rep_kw, "label": ("estimate (±σ_z)" if ref_est_labels
+                                           else "replay (±σ_z)")})
         if show_vvo:
-            ax.plot(t_vvo_rel, pos_vvo_rel[:, 2], ":", color="darkorange",
-                    lw=0.8, alpha=0.8, label="live VVO")
+            ax.plot(t_vvo_rel, pos_vvo_rel[:, 2], **vvo_kw)
         if show_mocap:
-            ax.plot(t_mocap_rel, pos_mocap_rel[:, 2], **MOCAP_KW)
+            ax.plot(t_mocap_rel, pos_mocap_rel[:, 2], **moc_kw)
         ax.set_xlabel("t [s]"); ax.set_ylabel("p_z [m]")
-        ax.set_title("Altitude")
+        _title(ax, "Altitude")
         ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
         # [0,2] speed |v|
         ax = axes[0, 2]
         if with_ekf:
             spd_ekf = np.linalg.norm(vel_ekf, axis=1)
-            ax.plot(t_ekf_rel, spd_ekf, "--", color="gray",
-                    lw=0.8, label="EKF2 (GT)")
+            ax.plot(t_ekf_rel, spd_ekf, **ekf_kw)
         if show_replay:
             spd_replay = np.linalg.norm(vel_N, axis=1)
-            ax.plot(t_replay_rel, spd_replay, color="steelblue",
-                    lw=0.6, label="replay")
+            ax.plot(t_replay_rel, spd_replay, **rep_kw)
         if show_vvo:
             spd_vvo = np.linalg.norm(vel_vvo, axis=1)
-            ax.plot(t_vvo_rel, spd_vvo, ":", color="darkorange",
-                    lw=0.8, alpha=0.8, label="live VVO")
+            ax.plot(t_vvo_rel, spd_vvo, **vvo_kw)
         if show_mocap:
-            ax.plot(t_mocap_rel, spd_mocap_full, **MOCAP_KW)
+            ax.plot(t_mocap_rel, spd_mocap_full, **moc_kw)
         ax.set_xlabel("t [s]"); ax.set_ylabel("|v| [m/s]")
-        ax.set_title("Speed")
+        _title(ax, "Speed")
         ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
         if not has_replay:
@@ -1082,8 +1115,9 @@ def main():
         else:
             goto_bottom_row = True
         if not goto_bottom_row:
-            fig.suptitle(f"compare overview — {args.replay_dir.name}  "
-                         "(no replay)")
+            if not ref_est_labels:
+                fig.suptitle(f"compare overview — {args.replay_dir.name}  "
+                             "(no replay)")
             fig.tight_layout()
             out = Path(out_root) / "compare.png"
             fig.savefig(out, dpi=120, bbox_inches="tight")
@@ -1105,9 +1139,9 @@ def main():
         # frame). Slight under-fill so adjacent bars don't merge visually.
         dt = np.median(np.diff(t_frame_rel)) if len(t_frame_rel) > 1 else 0.05
         width = 0.9 * dt
-        ax.bar(t_frame_rel, n_acc, width=width, color="steelblue",
+        ax.bar(t_frame_rel, n_acc, width=width, color=BLUE,
                linewidth=0, label="accepted")
-        ax.bar(t_frame_rel, n_rej, width=width, bottom=n_acc, color="crimson",
+        ax.bar(t_frame_rel, n_rej, width=width, bottom=n_acc, color=RED,
                linewidth=0, label="rejected")
         n_acc_all = int(n_acc.sum())
         n_tot_all = int(n_total.sum())
@@ -1119,7 +1153,7 @@ def main():
                 bbox=dict(facecolor="white", edgecolor="0.7",
                           alpha=0.85, pad=4))
         ax.set_xlabel("t [s]"); ax.set_ylabel("# radar points / frame")
-        ax.set_title("Accepted vs rejected radar measurements")
+        _title(ax, "Accepted vs rejected radar measurements")
         ax.grid(alpha=0.3, axis="y"); ax.legend(fontsize=8, loc="upper right")
 
         # [1,1] radar normalized innovation histogram.
@@ -1133,7 +1167,7 @@ def main():
         n_rej = int((rinn_df["status"] == 1).sum())
         bins = np.linspace(-5, 5, 80)
         ax.hist(np.clip(z, -5, 5), bins=bins, density=True, alpha=0.55,
-                color="steelblue",
+                color=BLUE,
                 label=f"n={len(z)} (acc {n_acc}, rej {n_rej})  std={z.std():.3f}")
         xs = np.linspace(-5, 5, 200)
         ax.plot(xs, np.exp(-xs**2 / 2) / np.sqrt(2 * np.pi),
@@ -1159,7 +1193,7 @@ def main():
 
         ax.set_yscale("log")
         ax.set_xlabel("residual / √S"); ax.set_ylabel("density (log)")
-        ax.set_title("Radar normalized innovation (accepted + rejected)")
+        _title(ax, "Radar normalized innovation (accepted + rejected)")
         ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=8, loc="upper right")
 
         # [1,2] baro innovation timeseries (residual + ±√S band)
@@ -1174,20 +1208,23 @@ def main():
                     np.asarray(binn_df.loc[bmask, "S"],           dtype=np.float64),
                     0, None))
             res   = np.asarray(binn_df.loc[bmask, "residual"],    dtype=np.float64)
-            ax.fill_between(btsub, -sig, sig, color="steelblue", alpha=0.15)
-            ax.plot(btsub, res, color="steelblue", lw=0.5, label="replay")
+            ax.fill_between(btsub, -sig, sig, color=BLUE, alpha=0.15)
+            ax.plot(btsub, res, color=BLUE, lw=0.5, label="replay")
         ax.axhline(0, color="k", lw=0.5)
         ax.set_xlabel("t [s]"); ax.set_ylabel("Δz residual [m]")
-        ax.set_title("Baro innovation (±√S band)")
+        _title(ax, "Baro innovation (±√S band)")
         ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
-        if not with_ekf:
+        if not with_ekf and not with_vvo:
+            title_ref = f"(replay vs {gt_name})"
+        elif not with_ekf:
             title_ref = "(replay vs live VVO, no EKF2)"
         elif not with_vvo:
             title_ref = "vs EKF2 (no live VVO)"
         else:
             title_ref = "vs EKF2" + ("  (+ live VVO)" if show_vvo else "")
-        fig.suptitle(f"compare overview — {args.replay_dir.name} {title_ref}")
+        if not ref_est_labels:
+            fig.suptitle(f"compare overview — {args.replay_dir.name} {title_ref}")
         fig.tight_layout()
         out = Path(out_root) / "compare.png"
         fig.savefig(out, dpi=120, bbox_inches="tight")
@@ -1197,8 +1234,19 @@ def main():
     render_overlays(save_dir,                with_ekf=True,  with_vvo=True)
     render_overlays(save_dir / "no_ekf",     with_ekf=False, with_vvo=True)
     render_overlays(save_dir / "no_vvo",     with_ekf=True,  with_vvo=False)
+    # Replay vs ground truth only (mocap if present, else EKF2): hide live VVO
+    # always, and hide EKF2 unless it IS the GT.
+    render_overlays(save_dir / "replayvsgt", with_ekf=(gt_name == "ekf2"),
+                    with_vvo=False, ref_est_labels=True)
 
-    print(f"\nDone — outputs in {save_dir}/  (+ no_ekf/, no_vvo/)")
+    # Radar extrinsic convergence (replay-only: p_IR / q_IR from state.csv +
+    # ±σ from cov_diag.csv). No GT reference — prior is marked at t=0.
+    if has_replay:
+        fig = plot_extrinsic_convergence([args.replay_dir], labels=["replay"],
+                                         bands="all")
+        handle_fig(fig, "compare_extrinsics", save_dir)
+
+    print(f"\nDone — outputs in {save_dir}/  (+ no_ekf/, no_vvo/, replayvsgt/)")
 
 
 if __name__ == "__main__":

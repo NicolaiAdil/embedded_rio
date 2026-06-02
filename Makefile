@@ -38,6 +38,9 @@ endif
 ifdef SKIP
   ARGS += --skip-seconds $(SKIP)
 endif
+ifdef ALIGN_EKF2
+  ARGS += --align-to-ekf2
+endif
 ifneq ($(strip $(MOCAP)),)
   ARGS += --mocap "$(MOCAP)"
 endif
@@ -51,7 +54,7 @@ ifdef MOCAP_FRAME
   ARGS += --mocap-body-frame $(MOCAP_FRAME)
 endif
 
-.PHONY: all build run compare clean help
+.PHONY: all build run compare ablation clean help
 
 all: build
 
@@ -79,6 +82,16 @@ compare:
 	$(PY) tools/replay/scripts/compare_with_ulog.py "$(OUT)" "$(ULG)" $(ARGS)
 	$(PY) tools/replay/scripts/plot_runs.py "$(OUT)" --save
 
+# Baro×underweighting ablation: builds rio_replay 4× (one per flag combo),
+# replays LOG through each into runs/$(NAME)/ablation/<tag>/, then overlays +
+# summarizes them in runs/$(NAME)/ablation/cmp/. GT = mocap when MOCAP is set,
+# else EKF2 (from ULG). SKIP=… is forwarded to compare_ablation.py.
+ablation:
+	@test -x $(PY) || { echo "missing $(PY) — see 'make compare' note for the venv"; exit 1; }
+	LOG="$(LOG)" ULG="$(ULG)" NAME="$(NAME)" SKIP="$(SKIP)" PY="$(PY)" \
+	  MOCAP="$(MOCAP)" MOCAP_OFFSET="$(MOCAP_OFFSET)" MOCAP_FRAME="$(MOCAP_FRAME)" \
+	  bash tools/replay/scripts/run_ablation.sh
+
 clean:
 	rm -rf $(BUILD_DIR)
 
@@ -87,6 +100,7 @@ help:
 	@echo "  make all       — configure + build rio_replay (default)"
 	@echo "  make run       — replay LOG into OUT"
 	@echo "  make compare   — run compare_with_ulog.py OUT vs ULG"
+	@echo "  make ablation  — build+run 4 baro×underweighting configs into runs/NAME/ablation/ (needs LOG + ULG; MOCAP optional GT)"
 	@echo "  make clean     — remove $(BUILD_DIR)"
 	@echo ""
 	@echo "inputs (set RIO_LOG / RIO_ULG / RIO_MOCAP in your env, or override on CLI):"
@@ -111,6 +125,7 @@ help:
 	@echo "    NO_VVO=1     → adds --no-vvo   (suppress live VVO overlay)"
 	@echo "    TOL=0.3      → adds --tol 0.3  (association tolerance, s)"
 	@echo "    SKIP=2       → adds --skip-seconds 2  (drop first 2s after VVO start)"
+	@echo "    ALIGN_EKF2=1 → adds --align-to-ekf2  (origin-align onto EKF2 attitude, not identity)"
 	@echo "    MOCAP=path/to.bag    → adds --mocap (overlay ROS1 mocap bag)"
 	@echo "    MOCAP_OFFSET=1.23    → adds --mocap-offset 1.23  (override |v|-autosync, s)"
 	@echo "    MOCAP_SYNC=vvo       → adds --mocap-sync-with vvo  (replay|vvo|ekf2; default replay)"

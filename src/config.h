@@ -6,7 +6,11 @@
 
 // Aiding switches. Set to 0 to read the sensor but skip its ESKF update —
 #define RADAR_AIDING_ENABLED 1
+// #ifndef guard lets the replay ablation build override this with a -D compile
+// flag (see tools/replay/CMakeLists.txt RIO_BARO_AIDING) without editing here.
+#ifndef BARO_AIDING_ENABLED
 #define BARO_AIDING_ENABLED  1
+#endif
 
 // Baro measurement mode:
 //   1 = differential (re-anchor on each accept; constrains Δz only)
@@ -18,7 +22,11 @@
 //   0 = standard S = H P H^T + R (no second-order correction)
 // Costs ~42 evaluations of the radar Jacobian per accepted point; worth
 // enabling when |H P H^T| is large relative to R (large attitude uncertainty).
+// #ifndef guard lets the replay ablation build override this with a -D compile
+// flag (see tools/replay/CMakeLists.txt RIO_RADAR_UNDERWEIGHT) without editing.
+#ifndef RADAR_UNDERWEIGHTING_ENABLED
 #define RADAR_UNDERWEIGHTING_ENABLED 1
+#endif
 
 // ── SD card logging ──────────────────────────────────────────────────────────
 // Master switch: set to 1 to enable CSV logging of sensor data to SD card.

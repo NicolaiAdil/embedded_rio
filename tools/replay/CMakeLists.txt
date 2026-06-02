@@ -27,6 +27,26 @@ target_link_libraries(rio_replay PRIVATE rio::rio_eskf_cpp)
 # simply unused by replay.
 target_include_directories(rio_replay PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src)
 
+# Ablation overrides for the two study axes. Default "AUTO" passes no -D, so
+# src/config.h stays in charge and the documented "edit config.h + rebuild"
+# workflow is unaffected. The ablation script (tools/replay/scripts/
+# run_ablation.sh) sets these to ON/OFF to force a value via -D; the matching
+# #ifndef guards in config.h let the compile flag win.
+set(RIO_BARO_AIDING "AUTO" CACHE STRING "baro aiding: AUTO|ON|OFF")
+set(RIO_RADAR_UNDERWEIGHT "AUTO" CACHE STRING "radar underweighting: AUTO|ON|OFF")
+
+if(RIO_BARO_AIDING STREQUAL "ON")
+  target_compile_definitions(rio_replay PRIVATE BARO_AIDING_ENABLED=1)
+elseif(RIO_BARO_AIDING STREQUAL "OFF")
+  target_compile_definitions(rio_replay PRIVATE BARO_AIDING_ENABLED=0)
+endif()
+
+if(RIO_RADAR_UNDERWEIGHT STREQUAL "ON")
+  target_compile_definitions(rio_replay PRIVATE RADAR_UNDERWEIGHTING_ENABLED=1)
+elseif(RIO_RADAR_UNDERWEIGHT STREQUAL "OFF")
+  target_compile_definitions(rio_replay PRIVATE RADAR_UNDERWEIGHTING_ENABLED=0)
+endif()
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(rio_replay PRIVATE -Wall -Wextra -Wpedantic)
 endif()
