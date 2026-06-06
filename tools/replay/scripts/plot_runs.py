@@ -57,7 +57,6 @@ def plot_trajectory_xy(ax, runs, colors):
         ax.scatter(s.p_x.iloc[0], s.p_y.iloc[0], color=c, marker="o", s=20)
         ax.scatter(s.p_x.iloc[-1], s.p_y.iloc[-1], color=c, marker="x", s=30)
     ax.set_xlabel("p_x [m]"); ax.set_ylabel("p_y [m]")
-    ax.set_title("Trajectory (top-down)  o=start  x=end")
     ax.set_aspect("equal", adjustable="datalim")
     ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
@@ -69,7 +68,6 @@ def plot_z_over_time(ax, runs, colors):
         ax.fill_between(s.t, s.p_z - sig, s.p_z + sig, color=c, alpha=0.15)
         ax.plot(s.t, s.p_z, color=c, lw=0.6, label=r["name"])
     ax.set_xlabel("t [s]"); ax.set_ylabel("p_z [m]")
-    ax.set_title("Altitude (±σ band)")
     ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
 
@@ -79,7 +77,6 @@ def plot_speed(ax, runs, colors):
         v = np.sqrt(s.v_x**2 + s.v_y**2 + s.v_z**2)
         ax.plot(s.t, v, color=c, lw=0.6, label=r["name"])
     ax.set_xlabel("t [s]"); ax.set_ylabel("|v| [m/s]")
-    ax.set_title("Speed")
     ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
 
@@ -95,7 +92,6 @@ def plot_sigmas(ax, runs, colors):
         ax.plot(cov.t, sa, color=c, lw=0.7, ls=":", label=f"{r['name']}  σ_θ")
     ax.set_yscale("log")
     ax.set_xlabel("t [s]"); ax.set_ylabel("σ (rms over xyz)")
-    ax.set_title("Covariance evolution (pos/vel/att)")
     ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=7)
 
 
@@ -116,7 +112,6 @@ def plot_radar_innov_hist(ax, runs, colors):
             color="k", lw=1, ls="--", label="N(0,1)")
     ax.set_yscale("log")
     ax.set_xlabel("residual / √S"); ax.set_ylabel("density (log)")
-    ax.set_title("Radar normalized innovation (accepted)")
     ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=8)
 
 
@@ -138,8 +133,6 @@ def plot_baro_innov(ax, runs, colors):
         any_data = True
     ax.axhline(0, color="k", lw=0.5)
     ax.set_xlabel("t [s]"); ax.set_ylabel("Δz residual [m]")
-    ax.set_title("Baro innovation (±√S band)"
-                 + ("" if any_data else "  — no accepted/rejected samples"))
     ax.grid(alpha=0.3)
     if any_data:
         ax.legend(fontsize=8)
@@ -169,7 +162,6 @@ def main():
     plot_sigmas          (axes[1, 0], runs, colors)
     plot_radar_innov_hist(axes[1, 1], runs, colors)
     plot_baro_innov      (axes[1, 2], runs, colors)
-    fig.suptitle("rio_replay — " + "  vs  ".join(r["name"] for r in runs))
     fig.tight_layout()
 
     # Radar extrinsic convergence (p_IR / q_IR + ±σ) for the same run set.

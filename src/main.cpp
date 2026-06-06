@@ -10,6 +10,7 @@
 #include "filter/eskf_node.h"
 #include "io/telemetry.h"
 #include "io/debug.h"
+#include "io/profiling.h"
 #include "io/status_leds.h"
 
 static constexpr ImuType IMU_TYPE = ImuType::BMI088;
@@ -43,6 +44,7 @@ static void sensorsInit() {
 void setup() {
   leds::init();
   debug::init();
+  profiling::init();
   telemetry::init();
   sensorsInit();
   eskf_node::init();
@@ -91,6 +93,7 @@ void loop() {
   leds::setFilterOk(eskf_node::isAttitudeInitialized());
   leds::tick();
   debug::tickRates(millis());
+  profiling::report(millis());
 
 #if SD_LOG_ENABLED
   static uint32_t s_flush_last_ms = 0;

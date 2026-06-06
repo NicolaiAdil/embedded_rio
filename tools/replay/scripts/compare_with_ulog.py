@@ -384,9 +384,8 @@ def evaluate_pair(gt_traj, gt_name, est_traj, est_name, t0_s, tol, save_dir):
         axs[i].set_ylabel(lbl); axs[i].grid(True, alpha=0.3)
     axs[3].plot(t_paired_rel, err_norm, color=NORM_COLOR, lw=0.8)
     axs[3].set_ylabel("|ΔP| [m]"); axs[3].grid(True, alpha=0.3)
-    axs[0].set_title(
-        f"Position error: {est_name} − {gt_name}  "
-        f"(RMS: X={rms[0]:.3f}  Y={rms[1]:.3f}  Z={rms[2]:.3f} m)")
+    print(f"  position error RMS: X={rms[0]:.3f}  Y={rms[1]:.3f}  "
+          f"Z={rms[2]:.3f} m")
     axs[-1].set_xlabel("t [s] (since EKF2 start)")
     plt.tight_layout()
     handle_fig(fig, f"compare_position_error_{est_name}", save_dir)
@@ -401,7 +400,7 @@ def evaluate_pair(gt_traj, gt_name, est_traj, est_name, t0_s, tol, save_dir):
         fig.gca(), ape.error, x_array=t_paired_rel,
         statistics={s: v for s, v in ape_stats.items() if s != "sse"},
         name="APE",
-        title=f"APE  (GT = {gt_name}, est = {est_name})",
+        title="",
         xlabel="t [s] (since EKF2 start)")
     handle_fig(fig, f"compare_ape_{est_name}", save_dir)
 
@@ -409,7 +408,7 @@ def evaluate_pair(gt_traj, gt_name, est_traj, est_name, t0_s, tol, save_dir):
     ax = plot.prepare_axis(fig, plot.PlotMode.xy)
     plot.traj(ax, plot.PlotMode.xy, a_gt, GT_LS, GREY, f"{gt_name} (GT)")
     plot.traj_colormap(ax, a_est, ape.error, plot.PlotMode.xy,
-                       title=f"{est_name} trajectory coloured by APE",
+                       title="",
                        min_map=ape_stats["min"], max_map=ape_stats["max"])
     ax.legend()
     handle_fig(fig, f"compare_ape_trajectory_{est_name}", save_dir)
@@ -428,7 +427,7 @@ def evaluate_pair(gt_traj, gt_name, est_traj, est_name, t0_s, tol, save_dir):
             fig.gca(), rpe.error, x_array=np.arange(len(rpe.error)),
             statistics={s: v for s, v in rpe_stats.items() if s != "sse"},
             name="RPE",
-            title=f"RPE: {est_name} vs {gt_name}  (δ={rpe_delta:.3f} m)",
+            title="",
             xlabel="pair index")
         handle_fig(fig, f"compare_rpe_{est_name}", save_dir)
     except FilterException as exc:
@@ -868,8 +867,12 @@ def main():
     # trajectory in the wrong direction. Umeyama on the trajectory absorbs
     # that residual yaw plus any small mocap-world → PX4-NED rotation.
     #
-    # Per-axis body-frame velocity isn't overlaid (same mocap-body frame
-    # mismatch); only |v| (frame-invariant) goes on the Speed panel.
+    # Per-axis body-frame velocity IS overlaid (vel_mocap is the rigid-body
+    # twist, already body-frame — same as how mocap attitude is overlaid).
+    # The Umeyama r_a is a world rotation and doesn't touch body velocity, so
+    # vel_mocap is plotted directly; correctness relies on the mocap rigid-body
+    # axes matching PX4 FRD (use --mocap-body-frame bld otherwise). The
+    # frame-invariant |v| also still goes on the Speed panel.
     t_mocap_rel = pos_mocap_rel = eul_mocap_full = spd_mocap_full = None
     if ts_mocap_us is not None:
         from evo.core.lie_algebra import se3
@@ -994,8 +997,9 @@ def main():
             sfx = ""
 
         def _title(ax, text):
-            """Per-axes title — suppressed in the clean replay-vs-GT folder."""
-            ax.set_title("" if ref_est_labels else text)
+            """Per-axes titles are suppressed everywhere — thesis figures use
+            LaTeX captions instead of in-figure titles."""
+            ax.set_title("")
 
         # Pose vs time — full traces, starting at their actual time offsets.
         fig, axs = plt.subplots(3, 2, sharex="col", figsize=(12, 8))
@@ -1052,6 +1056,8 @@ def main():
                 axs[i].plot(t_replay_rel, vel_replay_body[:, i], **rep_kw)
             if show_vvo and vel_vvo_body is not None:
                 axs[i].plot(t_vvo_rel, vel_vvo_body[:, i], **vvo_kw)
+            if show_mocap:
+                axs[i].plot(t_mocap_rel, vel_mocap[:, i], **moc_kw)
             axs[i].set_ylabel(lbl); axs[i].grid(True, alpha=0.3); axs[i].legend(fontsize=8)
         _title(axs[0], "Velocity vs time (body frame)" + sfx)
         axs[-1].set_xlabel("t [s] (since EKF2 start)")
@@ -1122,9 +1128,6 @@ def main():
         else:
             goto_bottom_row = True
         if not goto_bottom_row:
-            if not ref_est_labels:
-                fig.suptitle(f"compare overview — {args.replay_dir.name}  "
-                             "(no replay)")
             fig.tight_layout()
             out = Path(out_root) / "compare.png"
             fig.savefig(out, dpi=120, bbox_inches="tight")
@@ -1222,16 +1225,6 @@ def main():
         _title(ax, "Baro innovation (±√S band)")
         ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
-        if not with_ekf and not with_vvo:
-            title_ref = f"(replay vs {gt_name})"
-        elif not with_ekf:
-            title_ref = "(replay vs live VVO, no EKF2)"
-        elif not with_vvo:
-            title_ref = "vs EKF2 (no live VVO)"
-        else:
-            title_ref = "vs EKF2" + ("  (+ live VVO)" if show_vvo else "")
-        if not ref_est_labels:
-            fig.suptitle(f"compare overview — {args.replay_dir.name} {title_ref}")
         fig.tight_layout()
         out = Path(out_root) / "compare.png"
         fig.savefig(out, dpi=120, bbox_inches="tight")

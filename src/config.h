@@ -2,7 +2,17 @@
 
 // Set to 0 when flying (no USB connected) to skip all Serial prints.
 // Set to 1 when debugging on the bench with USB attached.
+// NOTE: the profiling report (PROFILING_ENABLED below) prints to USB Serial
+// independently of this flag — profiling::init() opens Serial itself. Keep this
+// at 0 while profiling so the USB carries ONLY the 1 Hz profile block (no state
+// dumps), and so publishState routes to sendOdometry → mavlink_publish is timed.
 #define USB_PRINT_ENABLED 0
+
+// Runtime profiling of the ESKF pipeline (see io/profiling.h). When 1, per-step
+// wall-clock running averages print to USB Serial every 1 s. Best used with
+// USB_PRINT_ENABLED 0 so MAVLink streams on Serial2 and USB carries only the
+// profile report. Compiles to nothing when 0.
+#define PROFILING_ENABLED 1
 
 // Aiding switches. Set to 0 to read the sensor but skip its ESKF update —
 #define RADAR_AIDING_ENABLED 1

@@ -59,6 +59,17 @@ def read_config(d: Path) -> dict:
     return {}
 
 
+def config_label(cfg: dict, default: str = "") -> str:
+    """Canonical ablation legend name derived from the baro/underweight flags:
+    (U)nderweighted (B)arometric Radar-Inertial Odometry. So baro+UW → UBRIO,
+    baro only → BRIO, UW only → URIO, neither → RIO. Falls back to the
+    config.json free-text label (then `default`) when the flags are absent."""
+    baro, uw = cfg.get("baro"), cfg.get("underweight")
+    if baro is None or uw is None:
+        return cfg.get("label", default)
+    return ("U" if uw else "") + ("B" if baro else "") + "RIO"
+
+
 def load_vvo_anchor(ulg: Path, skip_s: float):
     """Open the .ulg and read the VVO stream that anchors replay time.
 
@@ -102,7 +113,7 @@ def load_one_trace(d: Path, ts_vvo, t_cut_us, t0_s, color):
         raise SystemExit(f"{d}: empty after --skip-seconds trim")
     pos_rel, q_rel = align_origin_pose(pos_N, q_N, 0, target_q_wxyz=_REF_Q)
     cfg = read_config(d)
-    return dict(dir=d, label=cfg.get("label", d.name), color=color, config=cfg,
+    return dict(dir=d, label=config_label(cfg, d.name), color=color, config=cfg,
                 t=ts / 1e6 - t0_s, pos=pos_rel, spd=np.linalg.norm(vel_N, axis=1),
                 ts_us=ts, vel=vel_N, cov=pd.read_csv(d / "cov_diag.csv"),
                 traj=make_pose_trajectory(ts, pos_rel, q_rel))
@@ -226,13 +237,10 @@ def panel_trajectory(ax, gt, gt_kw, runs):
     clipped = [r["label"] for r in runs
                if r["pos"][:, 0].min() < xlim[0] or r["pos"][:, 0].max() > xlim[1]
                or r["pos"][:, 1].min() < ylim[0] or r["pos"][:, 1].max() > ylim[1]]
-    title = "Trajectory (top-down)"
     if clipped:
-        title += "  — view fit to GT"
         ax.text(0.02, 0.02, "off-view: " + ", ".join(clipped),
                 transform=ax.transAxes, fontsize=7, va="bottom", ha="left",
                 color="0.4")
-    ax.set_title(title)
     ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
 
@@ -242,7 +250,7 @@ def panel_altitude(ax, gt, gt_kw, runs):
         ax.plot(r["t"], r["pos"][:, 2],
                 **{**_trace_kw(r), "label": r["label"]})
     ax.set_xlabel("t [s]"); ax.set_ylabel("p_z [m]")
-    ax.set_title("Altitude"); ax.grid(alpha=0.3); ax.legend(fontsize=8)
+    ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
 
 def panel_speed(ax, gt, gt_kw, runs):
@@ -251,7 +259,7 @@ def panel_speed(ax, gt, gt_kw, runs):
         ax.plot(r["t"], r["spd"],
                 **{**_trace_kw(r), "label": r["label"]})
     ax.set_xlabel("t [s]"); ax.set_ylabel("|v| [m/s]")
-    ax.set_title("Speed"); ax.grid(alpha=0.3); ax.legend(fontsize=8)
+    ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
 
 def panel_bars(ax, runs, key, title):
@@ -262,7 +270,7 @@ def panel_bars(ax, runs, key, title):
     for b, v in zip(bars, vals):
         ax.annotate(f"{v:.3f}", (b.get_x() + b.get_width() / 2, v),
                     ha="center", va="bottom", fontsize=8)
-    ax.set_ylabel("RMSE [m]"); ax.set_title(title)
+    ax.set_ylabel("RMSE [m]")
     ax.grid(alpha=0.3, axis="y")
     ax.tick_params(axis="x", labelrotation=20)
 
@@ -371,8 +379,6 @@ def main():
                           [r["color"] for r in runs])
     panel_bars(axes[1, 1], runs, "ape", f"APE RMSE (vs {gt_tag})")
     panel_bars(axes[1, 2], runs, "rpe", f"RPE RMSE δ=10 m (vs {gt_tag})")
-    fig.suptitle(f"Ablation (GT = {gt_tag}) — "
-                 + "  vs  ".join(r["label"] for r in runs))
     fig.tight_layout(); fig.savefig(out / "ablation.png", dpi=120); plt.close(fig)
     print(f"  saved → {out / 'ablation.png'}")
 

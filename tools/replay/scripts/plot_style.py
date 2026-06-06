@@ -187,13 +187,8 @@ def plot_extrinsic_convergence(run_dirs, labels=None, colors=None,
 
     for i in range(3):
         axs[0, i].set_ylabel(p_labels[i])
-        axs[0, i].set_title(f"radar lever arm {p_labels[i].split()[0]}")
         axs[1, i].set_ylabel(f"q_IR {_EUL_LABELS[i]} [deg]")
-        axs[1, i].set_title(f"radar rotation {_EUL_LABELS[i]}")
         axs[1, i].set_xlabel("t [s] (since first sample)")
     axs[0, 0].legend(fontsize=8)
-    band_note = {"first": "  (±σ: first run)", "all": "  (±σ band)",
-                 "none": ""}.get(bands, "")
-    fig.suptitle("Radar extrinsic convergence  (p_IR, q_IR)" + band_note)
     fig.tight_layout()
     return fig

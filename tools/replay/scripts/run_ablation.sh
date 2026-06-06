@@ -28,10 +28,10 @@ JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
 # tag | baro | underweight | label   (baseline first → gets the blue color)
 combos=(
-  "baro_uw|ON|ON|baro+UW"
-  "baro_nouw|ON|OFF|baro,noUW"
-  "nobaro_uw|OFF|ON|noBaro,UW"
-  "none|OFF|OFF|none"
+  "baro_uw|ON|ON|UBRIO"
+  "baro_nouw|ON|OFF|BRIO"
+  "nobaro_uw|OFF|ON|URIO"
+  "none|OFF|OFF|RIO"
 )
 
 run_dirs=()

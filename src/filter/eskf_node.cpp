@@ -7,6 +7,7 @@
 
 #include "config.h"
 #include "io/debug.h"
+#include "io/profiling.h"
 #include "io/telemetry.h"
 #include "io/sd_logger.h"
 
@@ -133,8 +134,11 @@ void onImu(const rio::Vec3& acc, const rio::Vec3& gyr, float t) {
   s_last_imu = s;
 
   if (dt >= g_params.min_dt && dt <= g_params.max_dt) {
-    eskf.predict(s, dt);
-    eskf.insPropagation(s, dt);
+    {
+      PROFILE_SCOPE(IMU_PREDICT);
+      eskf.predict(s, dt);
+      eskf.insPropagation(s, dt);
+    }
 #if !RADAR_AIDING_ENABLED && !BARO_AIDING_ENABLED
     // No corrections will run — mirror prior into posterior so
     // getCovariance() reflects growing IMU-only uncertainty, and emit
@@ -168,19 +172,26 @@ void onRadarFrame(const RadarFrame& frame) {
 #if RADAR_AIDING_ENABLED
   rio::MeasurementContext ctx{&s_last_imu};
   uint32_t n_acc = 0, n_rej = 0, n_skp = 0;
-  for (uint32_t i = 0; i < frame.numRaw; i++) {
-    rio::RadarDopplerMeasurement m(
-        g_radar_p,
-        rio::Vec3(frame.raw[i].x, frame.raw[i].y, frame.raw[i].z),
-        frame.raw[i].vr);
-    const rio::MeasurementUpdate u = eskf.correct(m, ctx);
-    switch (u.status) {
-      case rio::MeasurementUpdate::Accepted: ++n_acc; break;
-      case rio::MeasurementUpdate::Rejected: ++n_rej; break;
-      default:                               ++n_skp; break;
+  {
+    PROFILE_SCOPE(RADAR_FRAME);
+    for (uint32_t i = 0; i < frame.numRaw; i++) {
+      rio::RadarDopplerMeasurement m(
+          g_radar_p,
+          rio::Vec3(frame.raw[i].x, frame.raw[i].y, frame.raw[i].z),
+          frame.raw[i].vr);
+      rio::MeasurementUpdate u;
+      {
+        PROFILE_SCOPE(RADAR_POINT);
+        u = eskf.correct(m, ctx);
+      }
+      switch (u.status) {
+        case rio::MeasurementUpdate::Accepted: ++n_acc; break;
+        case rio::MeasurementUpdate::Rejected: ++n_rej; break;
+        default:                               ++n_skp; break;
+      }
     }
+    if (n_acc == 0) eskf.advancePriorToPosterior();
   }
-  if (n_acc == 0) eskf.advancePriorToPosterior();
 
   const uint32_t total   = n_acc + n_rej + n_skp;
   const int8_t   quality = (total > 0)
@@ -222,7 +233,11 @@ void onBaroSample(float temp_c, float press_pa, float t) {
   baro.temp_c      = temp_c;
 
   g_baro_meas.setSample(baro);
-  const rio::MeasurementUpdate u = eskf.correct(g_baro_meas);
+  rio::MeasurementUpdate u;
+  {
+    PROFILE_SCOPE(BARO_UPDATE);
+    u = eskf.correct(g_baro_meas);
+  }
 
 #if USB_PRINT_ENABLED
   if (u.status == rio::MeasurementUpdate::Rejected) {

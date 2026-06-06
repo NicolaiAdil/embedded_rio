@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <common/mavlink.h>
 
+#include "io/profiling.h"
+
 #undef B0
 #undef B1
 #undef B2
@@ -38,6 +40,8 @@ void init() {
 
 void sendOdometry(const rio::NominalState& x, const rio::Mat21& P,
                   float t_sec, int8_t quality) {
+  PROFILE_SCOPE(MAVLINK_PUBLISH);  // MAVLink encode + Serial2.write
+
   // Rotate filter-internal frame to PX4's NED/FRD output. Two static frame
   // relationships, kept separate:
   //   q_w : world  filter-ENU -> PX4-NED   (180° about (1,1,0)/√2; the ENU↔NED
