@@ -38,12 +38,25 @@ void init() {
 
 void sendOdometry(const rio::NominalState& x, const rio::Mat21& P,
                   float t_sec, int8_t quality) {
-  // Rotate filter-internal frame to PX4's NED/FRD output.
-  static const rio::Quat q_t(0.0f, 0.7071067811865475f, 0.7071067811865475f, 0.0f);
+  // Rotate filter-internal frame to PX4's NED/FRD output. Two static frame
+  // relationships, kept separate:
+  //   q_w : world  filter-ENU -> PX4-NED   (180° about (1,1,0)/√2; the ENU↔NED
+  //         swap (x,y,z)->(y,x,-z)). Drives position.
+  //   q_m : body   my-IMU -> Pixhawk-IMU mount tilt. Measured from the 3005
+  //         highspeed/highspeed2 logs (the current mount) by a yaw-immune
+  //         gravity fit against EKF2 (roll ≈ 0°, pitch ≈ -0.5°; yaw
+  //         unobservable and irrelevant in GPS-denied EV). q_m = rotation
+  //         about body-y (pitch axis) by -0.5°.
+  // Correct outputs: p = q_w·p_WI, v_body = q_b·(q_WI⁻¹·v_WI),
+  // q_out = q_w·q_WI·q_b⁻¹, with q_b = q_m·q_w. That reduces to the three lines
+  // below (position world-only; velocity left-mult by q_m; attitude right-mult
+  // by q_m⁻¹). q_m⁻¹ is just q_m's conjugate.
+  static const rio::Quat q_w(0.0f, 0.7071067811865475f, 0.7071067811865475f, 0.0f);
+  static const rio::Quat q_m(0.99999048f, 0.0f, -0.00436332f, 0.0f);
 
-  const rio::Vec3 p_out  = q_t * x.p_WI;
-  const rio::Vec3 v_body = q_t * (x.q_WI.inverse() * x.v_WI);
-  const rio::Quat q_out  = q_t * x.q_WI * q_t.inverse();
+  const rio::Vec3 p_out  = q_w * x.p_WI;
+  const rio::Vec3 v_body = q_m * (q_w * (x.q_WI.inverse() * x.v_WI));
+  const rio::Quat q_out  = (q_w * x.q_WI * q_w.inverse()) * q_m.inverse();
 
   mavlink_odometry_t odom{};
   odom.time_usec      = (uint64_t)(t_sec * 1e6f);

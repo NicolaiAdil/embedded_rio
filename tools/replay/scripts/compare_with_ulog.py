@@ -158,20 +158,27 @@ def load_replay_state(replay_dir: Path):
     return df["t"].to_numpy(), pos_W, vel_W, q_W
 
 
-# Frame transform applied in firmware sendOdometry() (src/main.cpp) to send
-# ODOMETRY in PX4 NED. Replay's state.csv is in raw Teensy world frame, so
-# we apply the same rotation here.
+# Frame transform applied in firmware sendOdometry() (src/io/telemetry.cpp) to
+# send ODOMETRY in PX4 NED/FRD. Replay's state.csv is in raw Teensy world frame,
+# so we apply the same rotation here. Two static relationships, kept separate:
 #
-# Firmware uses Eigen's Quat(w,x,y,z) = (0, √2/2, √2/2, 0): a 180° rotation
-# about the axis (1,1,0)/√2 — the standard ENU↔NED swap, mapping
-# (x, y, z) → (y, x, −z). (The inline comment in src/main.cpp saying
-# "(0,0,1,0)" is stale; the constant itself is the source of truth.)
+#   _R_T : world  filter-ENU -> PX4-NED. Eigen Quat(w,x,y,z) = (0, √2/2, √2/2, 0):
+#          a 180° rotation about (1,1,0)/√2 — the standard ENU↔NED swap mapping
+#          (x, y, z) → (y, x, −z). Drives position.
+#   _R_M : body   my-IMU -> Pixhawk-IMU mount tilt, measured from the 3005
+#          highspeed/highspeed2 logs (current mount) by a yaw-immune gravity fit
+#          vs EKF2 (roll ≈ 0°, pitch ≈ -0.5°; yaw irrelevant in GPS-denied EV).
+#          Matches q_m in firmware.
 #
-#   p_NED = q_t · p_W
-#   q_NED = q_t · q_W · q_t.inv()
+#   p_NED = _R_T · p_W                          (position: world only)
+#   q_NED = (_R_T · q_W · _R_T.inv()) · _R_M.inv()
+# Velocity stays in NED world frame here (vel_N); the body-frame velocity is
+# derived downstream via vel_to_body_frame(vel_N, q_N), which already picks up
+# the mount tilt through the corrected q_N (R(q_N)ᵀ·vel_N == firmware v_body).
 _INV_SQRT2 = 1.0 / np.sqrt(2.0)
 _Q_T_XYZW = np.array([_INV_SQRT2, _INV_SQRT2, 0.0, 0.0])  # scipy uses (x, y, z, w)
 _R_T = Rotation.from_quat(_Q_T_XYZW)
+_R_M = Rotation.from_euler("y", -0.5, degrees=True)       # my-IMU -> Pixhawk-IMU
 
 
 def transform_replay_to_ned(pos_W, vel_W, q_W_wxyz):
@@ -179,7 +186,7 @@ def transform_replay_to_ned(pos_W, vel_W, q_W_wxyz):
     vel_N = _R_T.apply(vel_W)
     q_W_xyzw = q_W_wxyz[:, [1, 2, 3, 0]]
     R_W = Rotation.from_quat(q_W_xyzw)
-    R_N = _R_T * R_W * _R_T.inv()
+    R_N = _R_T * R_W * _R_T.inv() * _R_M.inv()
     q_N_xyzw = R_N.as_quat()
     q_N_wxyz = q_N_xyzw[:, [3, 0, 1, 2]]
     return pos_N, vel_N, q_N_wxyz
