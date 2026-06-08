@@ -192,3 +192,66 @@ def plot_extrinsic_convergence(run_dirs, labels=None, colors=None,
     axs[0, 0].legend(fontsize=8)
     fig.tight_layout()
     return fig
+
+
+# Single estimated 3-vector + its ±σ band, stacked x/y/z. ``kind`` picks the
+# state columns from state.csv and the matching error-state covariance diagonal
+# from cov_diag.csv (filter error-state order: 0-2 pos, 3-5 vel, 6-8 att,
+# 9-11 accel bias, 12-14 gyro bias, 15-17 radar pos, 18-20 radar att).
+_CONVERGENCE_KINDS = {
+    "accel_bias": dict(
+        cols=["ba_x", "ba_y", "ba_z"], cov=["P09", "P10", "P11"],
+        ylabels=["b_a,x [m/s²]", "b_a,y [m/s²]", "b_a,z [m/s²]"]),
+    "gyro_bias": dict(
+        cols=["bg_x", "bg_y", "bg_z"], cov=["P12", "P13", "P14"],
+        ylabels=["b_g,x [rad/s]", "b_g,y [rad/s]", "b_g,z [rad/s]"]),
+    "radar_pos": dict(
+        cols=["p_IR_x", "p_IR_y", "p_IR_z"], cov=["P15", "P16", "P17"],
+        ylabels=["p_IR,x [m]", "p_IR,y [m]", "p_IR,z [m]"]),
+    "radar_att": dict(
+        cols=["q_IR_w", "q_IR_x", "q_IR_y", "q_IR_z"], cov=["P18", "P19", "P20"],
+        ylabels=[f"q_IR {l} [deg]" for l in _EUL_LABELS], quat=True, deg=True),
+}
+
+
+def plot_state_convergence(run_dir, kind, label="estimate", color=BLUE,
+                           prior_marker=True, figsize=(9, 7)):
+    """Plot one estimated 3-vector state with its ±σ band, stacked x/y/z.
+
+    ``kind`` ∈ {"accel_bias", "gyro_bias", "radar_pos", "radar_att"} selects
+    which state (from state.csv) and covariance diagonal (from cov_diag.csv) to
+    read. The line carries the ``label`` legend entry (default "estimate") and
+    the shaded band carries its own "±σ" entry. ``prior_marker`` draws a dotted
+    line at the initial value. Returns the matplotlib Figure.
+    """
+    cfg = _CONVERGENCE_KINDS[kind]
+    run_dir = Path(run_dir)
+    s = pd.read_csv(run_dir / "state.csv")
+    c = pd.read_csv(run_dir / "cov_diag.csv")
+    n = min(len(s), len(c))
+    s, c = s.iloc[:n], c.iloc[:n]
+    t = s["t"].to_numpy(dtype=float)
+    t = t - t[0]
+    vals = s[cfg["cols"]].to_numpy(dtype=float)
+    if cfg.get("quat"):
+        vals = _euler_deg(vals)
+    sig = np.sqrt(np.clip(c[cfg["cov"]].to_numpy(dtype=float), 0, None))
+    if cfg.get("deg"):
+        sig = np.rad2deg(sig)
+
+    fig, axs = plt.subplots(3, 1, figsize=figsize, sharex=True)
+    for i in range(3):
+        ax = axs[i]
+        # Line created first so it leads the legend ("estimate", then "±σ");
+        # zorder keeps the line drawn above the translucent band.
+        ax.plot(t, vals[:, i], color=color, lw=1.1, label=label, zorder=3)
+        ax.fill_between(t, vals[:, i] - sig[:, i], vals[:, i] + sig[:, i],
+                        color=color, alpha=0.15, lw=0, label="±σ", zorder=0)
+        if prior_marker:
+            ax.axhline(vals[0, i], color=color, ls=":", lw=0.7, alpha=0.6)
+        ax.set_ylabel(cfg["ylabels"][i])
+        ax.grid(alpha=0.3)
+    axs[0].legend(fontsize=8)
+    axs[-1].set_xlabel("t [s] (since first sample)")
+    fig.tight_layout()
+    return fig

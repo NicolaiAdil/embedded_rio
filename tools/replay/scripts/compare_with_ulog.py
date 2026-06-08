@@ -59,9 +59,10 @@ from evo.core.units import Unit
 from evo.core.trajectory import PoseTrajectory3D
 
 import plot_style
-from plot_style import (BLUE, ORANGE, GREEN, RED, GREY, GT_LS,
+from plot_style import (BLUE, ORANGE, GREEN, RED, GREY, GT_LS, GT_LW,
                         AXIS_COLORS, NORM_COLOR,
-                        role_styles, band, plot_extrinsic_convergence)
+                        role_styles, band, plot_extrinsic_convergence,
+                        plot_state_convergence)
 
 
 # ── ulog helpers (lifted verbatim from /home/nicolai/ntnu/master/ulogs/plotter.py)
@@ -348,6 +349,30 @@ def auto_align_mocap_via_velocity(ts_mocap_s, vel_mocap,
     return offset_s
 
 
+def velocity_xcorr_shift(ts_ref_us, vel_ref, ts_b_us, vel_b, dt=0.005):
+    """Best-fit time shift [s] to add to clock B so |v_b| aligns with |v_ref|.
+
+    Normalized cross-correlation of the speed magnitudes on a uniform ``dt``
+    grid over the clocks' overlap. |v| is frame-invariant, so the two velocity
+    frames need not match. Returns None when the clocks don't overlap.
+    """
+    spd_ref = np.linalg.norm(vel_ref, axis=1)
+    spd_b   = np.linalg.norm(vel_b,   axis=1)
+    t_lo = max(ts_ref_us[0], ts_b_us[0]) / 1e6
+    t_hi = min(ts_ref_us[-1], ts_b_us[-1]) / 1e6
+    if t_hi <= t_lo:
+        return None
+    grid = np.arange(t_lo, t_hi + dt, dt)
+    s_r = np.interp(grid, ts_ref_us / 1e6, spd_ref)
+    s_b = np.interp(grid, ts_b_us  / 1e6, spd_b)
+    s_r = (s_r - s_r.mean()) / (s_r.std() + 1e-12)
+    s_b = (s_b - s_b.mean()) / (s_b.std() + 1e-12)
+    corr = correlate(s_r, s_b, mode="full")
+    lags = correlation_lags(len(s_r), len(s_b), mode="full")
+    best_lag = int(lags[int(np.argmax(corr))])
+    return float(best_lag) * dt
+
+
 def evaluate_pair(gt_traj, gt_name, est_traj, est_name, t0_s, tol, save_dir):
     """Compute and plot position-error + APE + RPE of `est_traj` against
     `gt_traj`. Saves three SVGs per pair (suffixed with `est_name`) so
@@ -355,7 +380,7 @@ def evaluate_pair(gt_traj, gt_name, est_traj, est_name, t0_s, tol, save_dir):
     from evo.core.filters import FilterException
     if est_traj.num_poses == 0 or gt_traj.num_poses == 0:
         print(f"  {est_name} vs {gt_name}: empty trajectory, skipping")
-        return
+        return None, None
     n_est_before = est_traj.num_poses
     a_gt, a_est = sync.associate_trajectories(
         gt_traj, est_traj, max_diff=tol,
@@ -363,7 +388,7 @@ def evaluate_pair(gt_traj, gt_name, est_traj, est_name, t0_s, tol, save_dir):
     if a_est.num_poses < 3:
         print(f"  {est_name} vs {gt_name}: only {a_est.num_poses} paired "
               f"within {tol*1000:.0f} ms — skipping metrics")
-        return
+        return None, None
     matched_pct = 100.0 * a_est.num_poses / max(n_est_before, 1)
     print(f"\n=== {est_name} vs {gt_name}  (matched "
           f"{a_est.num_poses}/{n_est_before}, {matched_pct:.1f}%) ===")
@@ -415,6 +440,7 @@ def evaluate_pair(gt_traj, gt_name, est_traj, est_name, t0_s, tol, save_dir):
 
     # RPE — fixed δ = 10 m so results are directly comparable across runs.
     rpe_delta = 10.0
+    rpe_stats = None
     rpe = metrics.RPE(pose_relation=metrics.PoseRelation.translation_part,
                       delta=rpe_delta, delta_unit=Unit.meters, all_pairs=True)
     try:
@@ -432,6 +458,8 @@ def evaluate_pair(gt_traj, gt_name, est_traj, est_name, t0_s, tol, save_dir):
         handle_fig(fig, f"compare_rpe_{est_name}", save_dir)
     except FilterException as exc:
         print(f"  RPE skipped: {exc}")
+
+    return ape_stats, rpe_stats
 
 
 def render_raw_sources(out_dir, ts_ekf, pos_ekf, q_ekf, vel_ekf,
@@ -610,6 +638,7 @@ def main():
 
     # ── time offset Teensy → PX4 (replay only) ────────────────────────────
     offset_us = 0.0
+    vvo_global_shift_s = 0.0   # |v| refinement shift applied to ts_vvo below
     t_replay_s = pos_W = vel_W = q_W = None
     pos_N = vel_N = q_N = ts_replay_us = None
     if has_replay:
@@ -688,8 +717,10 @@ def main():
 
             # Apply the shift to VVO timestamps so all downstream code
             # (mocap sync, trimming, overlays, APE/RPE) sees the refined
-            # VVO clock.
+            # VVO clock. Remembered so the parity re-sync can recover the raw
+            # VVO clock and align independently of this global refinement.
             ts_vvo = ts_vvo + vvo_shift_s * 1e6
+            vvo_global_shift_s = vvo_shift_s
 
     # ── optional mocap bag ─────────────────────────────────────────────────
     # Loaded BEFORE trimming so the full mocap trajectory is available for
@@ -1031,6 +1062,24 @@ def main():
         axs[-1, 1].set_xlabel("t [s] (since EKF2 start)")
         plt.tight_layout(); handle_fig(fig, "compare_pose", out_root)
 
+        # Yaw-only vs time — same style as the attitude column above (no
+        # title), only emitted for the replay-vs-GT pass (ref_est_labels).
+        if ref_est_labels:
+            fig, ax = plt.subplots(figsize=(12, 4))
+            if with_ekf:
+                ax.plot(t_ekf_rel, eul_ekf_full[:, 2], **ekf_kw)
+            if show_replay:
+                ax.plot(t_replay_rel, eul_replay_full[:, 2], **rep_kw)
+            if show_vvo:
+                ax.plot(t_vvo_rel, eul_vvo_full[:, 2], **vvo_kw)
+            if show_mocap:
+                ax.plot(t_mocap_rel, eul_mocap_full[:, 2], **moc_kw)
+            ax.set_ylabel(rpy_labels[2]); ax.grid(True, alpha=0.3)
+            ax.set_xlabel("t [s] (since EKF2 start)")
+            _title(ax, "Yaw vs time" + sfx)
+            ax.legend(fontsize=8)
+            plt.tight_layout(); handle_fig(fig, "compare_yaw", out_root)
+
         # XY trajectory overlay — per-trace origin-aligned, no time axis.
         fig, ax = plt.subplots(figsize=(8, 8))
         if with_ekf:
@@ -1238,15 +1287,112 @@ def main():
     # always, and hide EKF2 unless it IS the GT.
     render_overlays(save_dir / "replayvsgt", with_ekf=(gt_name == "ekf2"),
                     with_vvo=False, ref_est_labels=True)
+    # Persist the replay-vs-GT APE/RPE (rmse + std) into replayvsgt/ in the
+    # same evo style as the overlays above, plus a machine-readable summary.
+    if has_replay:
+        rvg = save_dir / "replayvsgt"
+        replay_traj = make_pose_trajectory(*sources["replay"])
+        ape_stats, rpe_stats = evaluate_pair(
+            gt_traj, gt_name, replay_traj, "replay", t0_s, args.tol, rvg)
+        if ape_stats is not None:
+            with (rvg / "metrics.json").open("w") as f:
+                json.dump({
+                    "gt": gt_name,
+                    "est": "replay",
+                    "ape_rmse_m": ape_stats["rmse"],
+                    "ape_std_m": ape_stats["std"],
+                    "rpe_rmse_m": rpe_stats["rmse"] if rpe_stats else None,
+                    "rpe_std_m": rpe_stats["std"] if rpe_stats else None,
+                }, f, indent=2)
+            print(f"  saved → {rvg / 'metrics.json'}")
+
+    # ── desktop ↔ live VVO parity ─────────────────────────────────────────
+    # Checks that the offline replay reproduces the live VVO stream the
+    # firmware actually published, given the same inputs/params. Both are
+    # already in PX4 NED and origin-aligned, so compare them directly:
+    # replay = reference (grey-dotted), live VVO = estimate (blue). Same
+    # thesis style as replayvsgt (no titles). APE/RPE magnitude is
+    # direction-symmetric, so the replay-as-reference choice only sets the
+    # colors/labels (blue = VVO, grey = replay) the user asked for.
+    if has_replay and t_vvo_rel is not None:
+        parity_dir = save_dir / "vvo_parity"
+        parity_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\nVVO parity (replay vs live VVO) → {parity_dir}/")
+
+        # Align live VVO to replay by |v| (absolute velocity) cross-correlation,
+        # independently of the EKF2-oriented global refinement: undo that global
+        # shift to recover the raw VVO clock, then fit the lag over the parity
+        # (post-trim) window only. |v| is frame-invariant so replay-NED and
+        # VVO-FRD velocities compare directly.
+        ts_vvo_raw = ts_vvo - vvo_global_shift_s * 1e6
+        parity_shift_s = velocity_xcorr_shift(ts_replay_us, vel_N,
+                                              ts_vvo_raw, vel_vvo)
+        if parity_shift_s is None:
+            parity_shift_s = 0.0
+            print("  |v| overlap empty — parity uses unshifted VVO clock")
+        else:
+            print(f"  |v| parity sync: VVO shift = {parity_shift_s*1000:+.1f} ms")
+        ts_vvo_parity = ts_vvo_raw + parity_shift_s * 1e6
+
+        # Before/after |v| diagnostic (blue = VVO, grey = replay).
+        t0 = ts_replay_us[0] / 1e6
+        spd_rep = np.linalg.norm(vel_N,   axis=1)
+        spd_vvo = np.linalg.norm(vel_vvo, axis=1)
+        figv, axv = plt.subplots(2, 1, sharex=True, figsize=(12, 6))
+        axv[0].plot(ts_replay_us/1e6 - t0, spd_rep, color=GREY, lw=0.8,
+                    label="replay |v|")
+        axv[0].plot(ts_vvo_raw/1e6 - t0,   spd_vvo, color=BLUE, lw=0.8,
+                    label="live VVO |v|")
+        axv[0].set_title("Before parity |v| sync"); axv[0].set_ylabel("|v| [m/s]")
+        axv[0].grid(alpha=0.3); axv[0].legend(fontsize=8)
+        axv[1].plot(ts_replay_us/1e6 - t0,  spd_rep, color=GREY, lw=0.8,
+                    label="replay |v|")
+        axv[1].plot(ts_vvo_parity/1e6 - t0, spd_vvo, color=BLUE, lw=0.8,
+                    label=f"live VVO |v|  (shifted {parity_shift_s*1000:+.1f} ms)")
+        axv[1].set_title("After parity |v| sync")
+        axv[1].set_xlabel("t [s] (replay-relative)"); axv[1].set_ylabel("|v| [m/s]")
+        axv[1].grid(alpha=0.3); axv[1].legend(fontsize=8)
+        figv.tight_layout()
+        handle_fig(figv, "velocity_sync", parity_dir)
+
+        # APE / RPE / position-error on the |v|-aligned parity clock.
+        ref_traj = make_pose_trajectory(ts_replay_us, pos_N_rel, q_N_rel)
+        est_traj = make_pose_trajectory(ts_vvo_parity, pos_vvo_rel, q_vvo_rel)
+        evaluate_pair(ref_traj, "replay", est_traj, "vvo",
+                      t0_s, args.tol, parity_dir)
+
+        # XY trajectory overlay — solid-blue live VVO over grey-dotted replay.
+        fig, ax = plt.subplots(figsize=(8, 8))
+        ax.plot(pos_N_rel[:, 0], pos_N_rel[:, 1],
+                color=GREY, ls=GT_LS, lw=GT_LW, alpha=0.90, label="replay")
+        ax.plot(pos_vvo_rel[:, 0], pos_vvo_rel[:, 1],
+                color=BLUE, ls="-", lw=1.1, alpha=0.95, label="live VVO")
+        ax.set_xlabel("x [m]"); ax.set_ylabel("y [m]")
+        ax.set_title("")
+        ax.set_aspect("equal")
+        ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
+        plt.tight_layout()
+        handle_fig(fig, "compare_trajectory_xy", parity_dir)
 
     # Radar extrinsic convergence (replay-only: p_IR / q_IR from state.csv +
     # ±σ from cov_diag.csv). No GT reference — prior is marked at t=0.
     if has_replay:
-        fig = plot_extrinsic_convergence([args.replay_dir], labels=["replay"],
+        fig = plot_extrinsic_convergence([args.replay_dir], labels=["estimate"],
                                          bands="all")
         handle_fig(fig, "compare_extrinsics", save_dir)
 
-    print(f"\nDone — outputs in {save_dir}/  (+ no_ekf/, no_vvo/, replayvsgt/)")
+        # Per-state convergence figures: accel/gyro bias and radar extrinsics,
+        # each x/y/z stacked with its ±σ band (legend: "estimate" + "±σ").
+        for kind, tag in (("accel_bias", "compare_accel_bias"),
+                          ("gyro_bias",  "compare_gyro_bias"),
+                          ("radar_pos",  "compare_radar_position"),
+                          ("radar_att",  "compare_radar_attitude")):
+            handle_fig(plot_state_convergence(args.replay_dir, kind), tag,
+                       save_dir)
+
+    extra = " + vvo_parity/" if (has_replay and t_vvo_rel is not None) else ""
+    print(f"\nDone — outputs in {save_dir}/  "
+          f"(+ no_ekf/, no_vvo/, replayvsgt/{extra})")
 
 
 if __name__ == "__main__":
