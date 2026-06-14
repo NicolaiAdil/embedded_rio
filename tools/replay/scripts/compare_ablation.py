@@ -99,13 +99,14 @@ def load_ekf_gt(ulog, t_cut_us):
     return t0_s, ekf
 
 
-def load_one_trace(d: Path, ts_vvo, t_cut_us, t0_s, color):
+def load_one_trace(d: Path, ts_vvo, t_cut_us, t0_s, color, apply_mount=True):
     """Load + align one replay run into the common frame (no metrics yet).
     Keeps the PX4-clock timestamps + NED velocity so the baseline run can be
     used as the mocap sync / Umeyama reference."""
     off = compute_time_offset_via_first_publish(d, ts_vvo)
     t_s, pos_W, vel_W, q_W = load_replay_state(d)
-    pos_N, vel_N, q_N = transform_replay_to_ned(pos_W, vel_W, q_W)
+    pos_N, vel_N, q_N = transform_replay_to_ned(pos_W, vel_W, q_W,
+                                                apply_mount=apply_mount)
     ts = t_s * 1e6 + off
     keep = ts >= t_cut_us
     ts, pos_N, vel_N, q_N = ts[keep], pos_N[keep], vel_N[keep], q_N[keep]
@@ -298,6 +299,10 @@ def main():
                     help="manual mocap→PX4 offset [s] (default: |v| auto-sync)")
     ap.add_argument("--mocap-body-frame", choices=("frd", "bld"), default="frd",
                     help="mocap rigid-body frame convention (default frd)")
+    ap.add_argument("--no-mount-correction", dest="mount_correction",
+                    action="store_false",
+                    help="skip the my-IMU -> Pixhawk-IMU mount tilt (_R_M, "
+                         "firmware q_m) on the replay attitude")
     args = ap.parse_args()
 
     plot_style.setup_mpl()
@@ -321,7 +326,8 @@ def main():
         t0_s, ekf = load_ekf_gt(ulog, t_cut_us)
 
     runs = [load_one_trace(d, ts_vvo, t_cut_us, t0_s,
-                           ABLATION_COLORS[i % len(ABLATION_COLORS)])
+                           ABLATION_COLORS[i % len(ABLATION_COLORS)],
+                           apply_mount=args.mount_correction)
             for i, d in enumerate(args.dirs)]
 
     # GT: mocap (synced to the baro+UW replay) when a bag is given, else EKF2.

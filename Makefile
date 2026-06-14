@@ -41,6 +41,9 @@ endif
 ifdef ALIGN_EKF2
   ARGS += --align-to-ekf2
 endif
+ifdef NO_MOUNT
+  ARGS += --no-mount-correction
+endif
 ifneq ($(strip $(MOCAP)),)
   ARGS += --mocap "$(MOCAP)"
 endif
@@ -90,6 +93,7 @@ ablation:
 	@test -x $(PY) || { echo "missing $(PY) — see 'make compare' note for the venv"; exit 1; }
 	LOG="$(LOG)" ULG="$(ULG)" NAME="$(NAME)" SKIP="$(SKIP)" PY="$(PY)" \
 	  MOCAP="$(MOCAP)" MOCAP_OFFSET="$(MOCAP_OFFSET)" MOCAP_FRAME="$(MOCAP_FRAME)" \
+	  NO_MOUNT="$(NO_MOUNT)" \
 	  bash tools/replay/scripts/run_ablation.sh
 
 clean:
@@ -126,6 +130,7 @@ help:
 	@echo "    TOL=0.3      → adds --tol 0.3  (association tolerance, s)"
 	@echo "    SKIP=2       → adds --skip-seconds 2  (drop first 2s after VVO start)"
 	@echo "    ALIGN_EKF2=1 → adds --align-to-ekf2  (origin-align onto EKF2 attitude, not identity)"
+	@echo "    NO_MOUNT=1   → adds --no-mount-correction  (no q_m on ANY trace: skipped on replay, un-baked from live VVO; also honored by 'make ablation')"
 	@echo "    MOCAP=path/to.bag    → adds --mocap (overlay ROS1 mocap bag)"
 	@echo "    MOCAP_OFFSET=1.23    → adds --mocap-offset 1.23  (override |v|-autosync, s)"
 	@echo "    MOCAP_SYNC=vvo       → adds --mocap-sync-with vvo  (replay|vvo|ekf2; default replay)"

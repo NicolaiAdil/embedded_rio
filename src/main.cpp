@@ -54,6 +54,15 @@ void setup() {
 }
 
 void loop() {
+  // 1 Hz profiling report first, OUTSIDE the SUPER_LOOP scope below: the USB
+  // print is profiler overhead (gone when PROFILING_ENABLED == 0) and would
+  // otherwise pollute the super loop's worst case once per second.
+  profiling::report(millis());
+
+  // Mean + worst-case execution time of one full loop() iteration, covering
+  // everything below including the early-return IMU paths and the SD flush.
+  PROFILE_SCOPE(SUPER_LOOP);
+
   // IMU — read every iteration, rate-gate the ESKF dispatch.
   rio::Vec3 acc, gyr;
   if (!bmi08xRead(acc, gyr)) {
@@ -93,7 +102,6 @@ void loop() {
   leds::setFilterOk(eskf_node::isAttitudeInitialized());
   leds::tick();
   debug::tickRates(millis());
-  profiling::report(millis());
 
 #if SD_LOG_ENABLED
   static uint32_t s_flush_last_ms = 0;

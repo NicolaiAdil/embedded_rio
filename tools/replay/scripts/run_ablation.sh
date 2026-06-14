@@ -9,6 +9,8 @@
 # Optional env:  NAME (default = LOG basename)  SKIP (skip-seconds, default 0)
 #               MOCAP (ROS1 bag → use as ground truth instead of EKF2)
 #               MOCAP_OFFSET / MOCAP_FRAME (forwarded to compare_ablation.py)
+#               NO_MOUNT (non-empty → --no-mount-correction: skip the q_m
+#               mount tilt when transforming replay to NED)
 #               PY (python, default .venv/bin/python3)  JOBS (build parallelism)
 #
 # Layout produced:  runs/<NAME>/ablation/<tag>/   (per-config data + config.json)
@@ -61,6 +63,7 @@ done
 
 echo "── plotting ablation ─────────────────────────────────────────────────"
 plot_args=(--ulg "$ULG" --skip-seconds "$SKIP" --out "runs/${NAME}/ablation/cmp")
+[ -n "${NO_MOUNT:-}" ] && plot_args+=(--no-mount-correction)
 if [ -n "${MOCAP:-}" ]; then
   plot_args+=(--mocap "$MOCAP")
   [ -n "${MOCAP_OFFSET:-}" ] && plot_args+=(--mocap-offset "$MOCAP_OFFSET")

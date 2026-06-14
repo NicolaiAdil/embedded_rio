@@ -12,7 +12,7 @@
 // wall-clock running averages print to USB Serial every 1 s. Best used with
 // USB_PRINT_ENABLED 0 so MAVLink streams on Serial2 and USB carries only the
 // profile report. Compiles to nothing when 0.
-#define PROFILING_ENABLED 1
+#define PROFILING_ENABLED 0
 
 // Aiding switches. Set to 0 to read the sensor but skip its ESKF update —
 #define RADAR_AIDING_ENABLED 1

@@ -28,6 +28,7 @@ enum Section : uint8_t {
   RADAR_FRAME,
   BARO_UPDATE,
   MAVLINK_PUBLISH,
+  SUPER_LOOP,  // one full loop() iteration (mean + worst case)
   NUM_SECTIONS,
 };
 

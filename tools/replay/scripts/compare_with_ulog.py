@@ -182,12 +182,14 @@ _R_T = Rotation.from_quat(_Q_T_XYZW)
 _R_M = Rotation.from_euler("y", -0.5, degrees=True)       # my-IMU -> Pixhawk-IMU
 
 
-def transform_replay_to_ned(pos_W, vel_W, q_W_wxyz):
+def transform_replay_to_ned(pos_W, vel_W, q_W_wxyz, apply_mount=True):
     pos_N = _R_T.apply(pos_W)
     vel_N = _R_T.apply(vel_W)
     q_W_xyzw = q_W_wxyz[:, [1, 2, 3, 0]]
     R_W = Rotation.from_quat(q_W_xyzw)
-    R_N = _R_T * R_W * _R_T.inv() * _R_M.inv()
+    R_N = _R_T * R_W * _R_T.inv()
+    if apply_mount:
+        R_N = R_N * _R_M.inv()
     q_N_xyzw = R_N.as_quat()
     q_N_wxyz = q_N_xyzw[:, [3, 0, 1, 2]]
     return pos_N, vel_N, q_N_wxyz
@@ -579,6 +581,11 @@ def main():
                     help="Which trace's |v| to cross-correlate mocap against "
                          "for the auto time-sync (default: replay). Ignored "
                          "when --mocap-offset is given.")
+    ap.add_argument("--no-mount-correction", dest="mount_correction",
+                    action="store_false",
+                    help="Do not apply the static my-IMU -> Pixhawk-IMU mount "
+                         "tilt (_R_M, firmware q_m) to the replay attitude; "
+                         "only the ENU->NED world swap (_R_T) is applied.")
     ap.add_argument("--mocap-body-frame", choices=("frd", "bld"),
                     default="frd",
                     help="Mocap rigid-body frame convention (default: frd). "
@@ -600,6 +607,18 @@ def main():
     ulog = ULog(str(args.ulg))
     ts_vvo, pos_vvo, q_vvo, vel_vvo, df_vvo = load_visual_odometry(ulog)
     ts_ekf, pos_ekf, q_ekf, vel_ekf, _      = load_estimator_local_position(ulog)
+    if not args.mount_correction:
+        # Firmware bakes q_m into the recorded VVO stream (telemetry.cpp:
+        # q_out = (q_w·q_WI·q_w⁻¹)·q_m⁻¹, v_body = q_m·(q_w·(q_WI⁻¹·v_WI))).
+        # Un-apply it so --no-mount-correction means "no q_m on ANY trace",
+        # keeping live VVO directly comparable to the no-mount replay.
+        # Position is untouched by q_m. EKF2 is PX4's own estimate — q_m
+        # never applied to it, nothing to undo.
+        q_vvo_xyzw = q_vvo[:, [1, 2, 3, 0]]
+        q_vvo = (Rotation.from_quat(q_vvo_xyzw) * _R_M).as_quat()[:, [3, 0, 1, 2]]
+        vel_vvo = _R_M.inv().apply(vel_vvo)
+        print("mount correction q_m: removed from replay AND un-baked "
+              "from live VVO (--no-mount-correction)")
     print(f"vehicle_visual_odometry  : {len(ts_vvo)} msgs, "
           f"{(ts_vvo[-1]-ts_vvo[0])/1e6:.2f}s")
     print(f"estimator_local_position : {len(ts_ekf)} msgs, "
@@ -659,7 +678,8 @@ def main():
 
         # ── load replay, transform to NED, apply offset ───────────────────
         t_replay_s, pos_W, vel_W, q_W = load_replay_state(args.replay_dir)
-        pos_N, vel_N, q_N = transform_replay_to_ned(pos_W, vel_W, q_W)
+        pos_N, vel_N, q_N = transform_replay_to_ned(
+            pos_W, vel_W, q_W, apply_mount=args.mount_correction)
         ts_replay_us = t_replay_s * 1e6 + offset_us
         print(f"\nreplay/state.csv         : {len(t_replay_s)} rows, "
               f"{t_replay_s[-1]-t_replay_s[0]:.2f}s   "

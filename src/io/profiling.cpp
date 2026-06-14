@@ -22,6 +22,7 @@ const char* const s_names[NUM_SECTIONS] = {
     "radar_frame",
     "baro_update",
     "mavlink_publish",
+    "super_loop",
 };
 
 }  // namespace
