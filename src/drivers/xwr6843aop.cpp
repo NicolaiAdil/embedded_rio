@@ -5,7 +5,7 @@
 #undef B2
 #undef B3
 
-#include "xwr6843aop.h"
+#include "drivers/xwr6843aop.h"
 #include "config.h"
 #include <string.h>
 #include <math.h>
@@ -214,12 +214,18 @@ static void parseTLVs(const uint8_t* buf, size_t len, RadarFrame& frame) {
   }
 #endif
 
-  for (uint32_t ti = 0; ti < frame.numTLV && ptr + 8 <= end; ti++) {
+  for (uint32_t ti = 0; ti < frame.numTLV; ti++) {
+    if (ptr + 8 > end) break;                          // header doesn't fit
     uint32_t tlvType = u32le(ptr);
     uint32_t tlvLen  = u32le(ptr + 4);
     const uint8_t* tlvData = ptr + 8;
-    ptr += 8 + tlvLen;
-    if (ptr > end) break;
+    // Validate tlvLen fits in the remaining frame BEFORE advancing ptr.
+    // Without this, a glitched/desynced frame can carry a wild tlvLen and
+    // the DETECTED_POINTS loop below reads up to MAX_POINTS*16 bytes past
+    // tlvData, which lands in invalid memory regions and hard-faults the
+    // chip (Data Access Violation seen in CrashReport).
+    if (tlvLen > (uint32_t)(end - tlvData)) break;
+    ptr = tlvData + tlvLen;
 
 #if USB_PRINT_ENABLED
     if (do_dbg) {
@@ -256,14 +262,17 @@ static void parseTLVs(const uint8_t* buf, size_t len, RadarFrame& frame) {
 #endif
       for (uint32_t i = 0; i < nPts && frame.numRaw < RadarFrame::MAX_POINTS; i++) {
         const uint8_t* p = tlvData + i * 16;
-        const float raw_x = f32le(p + 0);
-        const float raw_y = f32le(p + 4);
-        const float raw_z = f32le(p + 8);
+        const float raw_x  = f32le(p + 0);
+        const float raw_y  = f32le(p + 4);
+        const float raw_z  = f32le(p + 8);
+        const float raw_vr = f32le(p + 12);
+        if (!isfinite(raw_x) || !isfinite(raw_y) ||
+            !isfinite(raw_z) || !isfinite(raw_vr)) continue;
         RadarPoint& rp = frame.raw[frame.numRaw++];
         rp.x  = raw_x;
         rp.y  = raw_y;
         rp.z  = raw_z;
-        rp.vr = f32le(p + 12);
+        rp.vr = raw_vr;
       }
     }
   }

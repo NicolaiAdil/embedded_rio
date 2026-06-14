@@ -2,7 +2,41 @@
 
 // Set to 0 when flying (no USB connected) to skip all Serial prints.
 // Set to 1 when debugging on the bench with USB attached.
-#define USB_PRINT_ENABLED 1
+// NOTE: the profiling report (PROFILING_ENABLED below) prints to USB Serial
+// independently of this flag — profiling::init() opens Serial itself. Keep this
+// at 0 while profiling so the USB carries ONLY the 1 Hz profile block (no state
+// dumps), and so publishState routes to sendOdometry → mavlink_publish is timed.
+#define USB_PRINT_ENABLED 0
+
+// Runtime profiling of the ESKF pipeline (see io/profiling.h). When 1, per-step
+// wall-clock running averages print to USB Serial every 1 s. Best used with
+// USB_PRINT_ENABLED 0 so MAVLink streams on Serial2 and USB carries only the
+// profile report. Compiles to nothing when 0.
+#define PROFILING_ENABLED 0
+
+// Aiding switches. Set to 0 to read the sensor but skip its ESKF update —
+#define RADAR_AIDING_ENABLED 1
+// #ifndef guard lets the replay ablation build override this with a -D compile
+// flag (see tools/replay/CMakeLists.txt RIO_BARO_AIDING) without editing here.
+#ifndef BARO_AIDING_ENABLED
+#define BARO_AIDING_ENABLED  1
+#endif
+
+// Baro measurement mode:
+//   1 = differential (re-anchor on each accept; constrains Δz only)
+//   0 = absolute     (anchor fixed at boot; z=0 = position at first baro lock)
+#define BARO_AIDING_DIFFERENTIAL 0
+
+// Radar second-order measurement underweighting (NavFilter Best Practices §5.2.3):
+//   1 = inflate S by B = ½ tr(H_xx P H_xx P) per radar Doppler update
+//   0 = standard S = H P H^T + R (no second-order correction)
+// Costs ~42 evaluations of the radar Jacobian per accepted point; worth
+// enabling when |H P H^T| is large relative to R (large attitude uncertainty).
+// #ifndef guard lets the replay ablation build override this with a -D compile
+// flag (see tools/replay/CMakeLists.txt RIO_RADAR_UNDERWEIGHT) without editing.
+#ifndef RADAR_UNDERWEIGHTING_ENABLED
+#define RADAR_UNDERWEIGHTING_ENABLED 1
+#endif
 
 // ── SD card logging ──────────────────────────────────────────────────────────
 // Master switch: set to 1 to enable CSV logging of sensor data to SD card.

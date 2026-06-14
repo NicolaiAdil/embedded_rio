@@ -1,4 +1,4 @@
-#include "bmi08x.h"
+#include "drivers/bmi08x.h"
 #include <Wire.h>
 
 static constexpr uint8_t ACC_ADDR = 0x19;
