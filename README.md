@@ -1,47 +1,73 @@
+# Embedded-RIO
 
-Bosch IMU: https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bmi085-ds001.pdf
+Tightly-coupled radar-inertial odometry firmware for a Teensy 4.x. An
+error-state Kalman filter (ESKF) fuses mmWave radar Doppler with IMU (and
+optionally barometer) to estimate pose, and streams it to an unmodified PX4
+flight controller over MAVLink (the external-vision interface) for flight in
+GNSS-denied environments.
 
-Bosch barometer: https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bmp388-ds001.pdf
+Hardware: TI IWR6843AOP radar, Bosch BMI088 IMU, Bosch BMP388 baro.
 
-TI Radar: https://www.ti.com/tool/IWR6843AOPEVM
+Datasheets:
+[BMI088 (IMU)](https://www.bosch-sensortec.com/en/products/motion-sensors/imus/bmi088) ·
+[BMP388 (baro)](https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bmp388-ds001.pdf) ·
+[IWR6843AOP (radar)](https://www.ti.com/tool/IWR6843AOPEVM)
 
-Build and upload to teensy 4.1:
-```
-pio run -e teensy41
-pio run -e teensy41 --target upload
-```
+## Build & flash (firmware)
 
-Build and upload to teensy 4.0:
-```
-pio run -e teensy40
-pio run -e teensy40 --target upload
-```
+Built with [PlatformIO](https://platformio.org/). `teensy40` is the active
+target (the `teensy41` environment is currently commented out in
+[platformio.ini](platformio.ini)).
 
-
-Offline replay. `RUN_DIR` is any folder name; the binary writes
-`state.csv`, `cov_diag.csv`, `radar_innov.csv`, `baro_innov.csv`
-into it.
-```
-cmake -S tools/replay -B build/replay -DCMAKE_BUILD_TYPE=Release
-cmake --build build/replay -j
-./build/replay/rio_replay PATH_TO_CSV RUN_DIR
-python3 tools/replay/scripts/plot_runs.py RUN_DIR
+```sh
+pio run -e teensy40                  # build firmware
+pio run -e teensy40 --target upload  # flash over USB
 ```
 
-Retune by editing `makeParams()` / `kRadarParams` / `kBaroParams` /
-`P0_diag` in `tools/replay/src/replay.cpp`. Write each run into its
-own dir to keep the originals for comparison:
-```
-cmake --build build/replay -j
-./build/replay/rio_replay PATH_TO_CSV RUN_DIR_2
-python3 tools/replay/scripts/plot_runs.py RUN_DIR RUN_DIR_2
+## config.h
+
+[src/config.h](src/config.h) holds the compile-time flags, and is **shared by
+both the firmware and the offline replay tool**. Edit it and rebuild to change
+behaviour. The main flags:
+
+| Flag | Meaning |
+| --- | --- |
+| `RADAR_AIDING_ENABLED` | Master radar on/off (read the sensor but skip its ESKF update when 0) |
+| `BARO_AIDING_ENABLED` | Master barometer on/off |
+| `BARO_AIDING_DIFFERENTIAL` | `0` = absolute anchor (default), `1` = differential re-anchoring |
+| `RADAR_UNDERWEIGHTING_ENABLED` | Radar second-order measurement underweighting |
+| `USB_PRINT_ENABLED` | `1` = print state over USB serial, `0` = send over MAVLink |
+| `SD_LOG_ENABLED` / `SD_BUILTIN` | SD logging; `SD_BUILTIN` = `1` Teensy 4.1 SDIO, `0` Teensy 4.0 SPI |
+| `PROFILING_ENABLED` | Runtime profiling of the ESKF pipeline |
+
+The `#ifndef`-guarded flags (`BARO_AIDING_ENABLED`, `RADAR_UNDERWEIGHTING_ENABLED`,
+`SD_BUILTIN`) can be overridden at build time with `-D` flags (this is how the
+replay ablation study sweeps configurations without editing this file).
+
+## Live plotting
+
+Set `#define USB_PRINT_ENABLED 1` in [src/config.h](src/config.h) and reflash.
+The firmware then streams the full ESKF state over USB serial, which you can
+visualize live:
+
+```sh
+pip install pyserial matplotlib numpy
+python3 scripts/serial_plotter.py --port /dev/ttyACM0
 ```
 
-Compare a replay against PX4 EKF2 from a paired `.ulg`:
+## Offline replay
+
+The replay tool runs the same ESKF code as the firmware against a recorded
+CSV log on your desktop (for tuning, validation, and ablation studies). The
+[Makefile](Makefile) wraps the common workflow:
+
+```sh
+make build   
+make run       
+make compare   
+make ablation   # plots all permutations
 ```
-PATH_TO_VENV/bin/python3 tools/replay/scripts/compare_with_ulog.py \
-    RUN_DIR PATH_TO_ULG --include_live
-```
-Outputs in `RUN_DIR/cmp/`. `--include_live` overlays the live
-`vehicle_visual_odometry` trace from the `.ulg`; if it doesn't match
-replay, the firmware and replay binary are out of sync.
+
+Inputs default from the `RIO_LOG` / `RIO_ULG` environment variables.
+
+Run `make help` for the full list of targets, inputs, and comparison flags.
